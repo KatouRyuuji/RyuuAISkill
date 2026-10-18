@@ -1,6 +1,6 @@
 # RyuuAISkill
 
-RyuuAISkill 是我长期维护的 Agent Skill 合集。它以显式的 `/ryuuji-ai-skill` 为统一入口，保留完整的 `/poteto-mode`，并提供存储审计和项目级按需 MCP 扩展方式。
+RyuuAISkill 是我长期维护的 Agent Skill 合集。它以显式的 `/ryuuji-ai-skill` 为统一入口，保留完整的 `/poteto-mode`，并提供存储审计、项目级按需 MCP 和多 agent 用户级提示词迁移。
 
 Claude Code 是首要目标平台；仓库同时保留 pstack 对其他 harness 的兼容说明。
 
@@ -20,9 +20,11 @@ Claude Code 是首要目标平台；仓库同时保留 pstack 对其他 harness 
 | [`/ryuuji-ai-skill`](./skills/ryuuji-ai-skill/SKILL.md) | RyuuAI 的显式统一入口，负责扩展路由和 poteto-mode 回退 |
 | [`/poteto-mode`](./skills/poteto-mode/SKILL.md) | 原有的完整工程编排入口，可独立使用 |
 | [`/storage-audit`](./skills/storage-audit/SKILL.md) | 只读分析目录冗余、缓存、压缩包副本和存储空间 |
+| [`/agent-prompt-sync`](./skills/agent-prompt-sync/SKILL.md) | 维护唯一 Ryuuji 正本，以链接和平台增量同步实际 agent 的用户级提示词 |
 | [Scoped MCP 约定](./skills/ryuuji-ai-skill/references/scoped-mcp.md) | 使用项目子代理的 inline `mcpServers`，在任务期间连接 MCP |
 | [独立 MCP 会话](./skills/ryuuji-ai-skill/references/independent-mcp.md) | 使用独立 `claude -p` 进程和显式 MCP 配置执行一次性任务 |
 | [`tests/scoped-mcp`](./tests/scoped-mcp/) | 验证两种隔离方式的 MCP 生命周期、权限和清理 |
+| [`tests/agent-prompt-sync`](./tests/agent-prompt-sync/) | 验证提示词链接、增量、备份、回滚和冲突 |
 
 `/poteto-mode` 没有被 `/ryuuji-ai-skill` 替代。你可以继续直接使用它。
 
@@ -34,7 +36,7 @@ Claude Code 是首要目标平台；仓库同时保留 pstack 对其他 harness 
 npx skills add KatouRyuuji/RyuuAISkill
 ```
 
-安装器会列出可选择的 skills。使用完整 RyuuAI 路由时，选择 `ryuuji-ai-skill`、`poteto-mode`、`storage-audit` 及其依赖；只需要某个独立 skill 时，可以只安装它和所需依赖。
+安装器会列出可选择的 skills。使用完整 RyuuAI 路由时，选择 `ryuuji-ai-skill`、`poteto-mode`、`storage-audit`、`agent-prompt-sync` 及其依赖；只需要某个独立 skill 时，可以只安装它和所需依赖。
 
 ## 使用
 
@@ -47,6 +49,7 @@ npx skills add KatouRyuuji/RyuuAISkill
 RyuuAI 目前这样路由：
 
 - 存储分析 → `storage-audit`。
+- 用户级提示词分析、精简或同步 → `agent-prompt-sync`。
 - 需要任务级 MCP → 对应的预注册项目 agent 或独立 `claude -p` 进程。
 - 其他请求 → 只进入一次 `poteto-mode`。
 
@@ -78,6 +81,20 @@ RyuuAI 目前这样路由：
 - MCP-only 任务使用 `--tools ""` 禁用内置工具；`--allowedTools` 只负责权限放行，不是工具白名单。
 - 进程退出后确认 MCP 已停止，再删除临时配置和目录。
 
+### 同步用户级提示词
+
+```text
+/agent-prompt-sync 分析本机 agent 的用户级提示词并给出迁移方案
+```
+
+skill 以 [`ryuuji-user-prompt.md`](./skills/agent-prompt-sync/references/ryuuji-user-prompt.md) 为发布模板，以 `~/.claude/CLAUDE.md` 为唯一运行正本。它先分析现有规则，再生成三个 dry-run 增量分支，并把 diff 简报贴进对话：
+
+- **A**：只使用正本，所有平台增量为空。
+- **B**：正本之外，保守保留非重复的现有规则。
+- **C**：正本之外，只保留最少必要的现有规则。
+
+Claude Code 使用原生用户规则保存增量，并清点未托管的 `~/.claude/rules/*.md`；Codex 使用机制生成的 composite；Cursor 使用本机 `.mdc` 规则，本地仍有账户 User Rules 时拒绝 apply；OpenCode 把增量写进 `opencode.jsonc`（若存在）否则 `opencode.json` 的 `instructions`。正本入口由 symlink 或 hardlink 维护，不靠手工复制。只有用户选择分支并再次确认后，才会备份并应用目标状态。模板只在你明确要求时更新。
+
 ## 设计思路
 
 ### 薄入口，单次路由
@@ -105,11 +122,13 @@ RyuuAISkill 是独立的公开仓库，不设置指向原 fork 的上游同步�
 ```text
 skills/
   ryuuji-ai-skill/     # 统一入口和 scoped MCP 约定
+  agent-prompt-sync/   # 唯一正本、链接、平台增量与安全应用
   storage-audit/       # 只读存储审计扩展
   poteto-mode/         # poteto 编排、playbooks 和状态脚本
   principle-*/         # poteto 原则叶子 skills
 agents/                # pstack 子代理定义
 tests/scoped-mcp/      # 子代理与独立进程的 MCP 测试
+tests/agent-prompt-sync/ # 提示词链接、增量、备份、回滚和冲突测试
 docs/guide/            # pstack 使用指南
 ```
 
@@ -123,6 +142,7 @@ npx --yes bun test --cwd skills/poteto-mode/scripts
 npx --yes bun run --cwd skills/poteto-mode/scripts typecheck
 node tests/scoped-mcp/run.mjs
 node tests/scoped-mcp/independent.mjs
+node tests/agent-prompt-sync/run.mjs
 ```
 
 storage-audit 的 quick 只读采集示例：
