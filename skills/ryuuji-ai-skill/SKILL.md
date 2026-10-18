@@ -13,7 +13,7 @@ RyuuAI is a thin entry over pstack. Route each request once.
 Handle a request that clearly matches one of these extensions by reading the referenced file in full and following it. Do not also enter `poteto-mode` for that request.
 
 - **Storage audit.** Directory redundancy, reclaimable space, archive copies, or storage cleanup analysis. Read `../storage-audit/SKILL.md`.
-- **Project-scoped MCP.** A task needs an MCP server that should connect only for a delegated task. Read `references/scoped-mcp.md`, select the matching pre-registered project agent, and delegate the task instead of running it in the parent chat.
+- **Project-scoped MCP.** A task needs an MCP server only for delegated work. For a subagent in the current session, read `references/scoped-mcp.md` and select the matching pre-registered project agent. For a separate `claude -p` process, read `references/independent-mcp.md`. Choose one isolation mode and run the task outside the parent chat.
 
 For a mixed request, split it into explicit tasks and route each task once.
 

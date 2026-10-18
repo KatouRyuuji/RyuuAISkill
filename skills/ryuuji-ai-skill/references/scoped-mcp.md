@@ -2,6 +2,8 @@
 
 Use a project agent when an MCP server belongs to one delegated task rather than the parent chat. The parent keeps its existing persistent MCP servers unchanged.
 
+For a separate `claude -p` process instead of a subagent, read `independent-mcp.md`.
+
 ## Register the agent before the session
 
 Place the agent in the consuming project's `.claude/agents/`. Do not put scoped MCP configuration in a plugin-provided agent: Claude Code ignores `mcpServers` on plugin subagents.

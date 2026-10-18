@@ -1,83 +1,22 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  claudePrefix,
+  MARKER,
+  readEvents,
+  runClaude,
+  truncate,
+} from "./helpers.mjs";
 
-const MARKER = "RYUUJI_MCP_FIXTURE_OK";
 const MAX_ATTEMPTS = 3;
-const TIMEOUT_MS = 240_000;
 const here = dirname(fileURLToPath(import.meta.url));
 const serverPath = join(here, "fixture-server.mjs");
-const claudeCommand = process.execPath;
-const npxCliPath =
-  process.env.npm_execpath ??
-  (process.platform === "win32"
-    ? join(dirname(process.execPath), "node_modules", "npm", "bin", "npx-cli.js")
-    : join(dirname(process.execPath), "..", "lib", "node_modules", "npm", "bin", "npx-cli.js"));
-const claudePrefix = [npxCliPath, "--yes", "@anthropic-ai/claude-code@2.1.302"];
 
 function yamlString(value) {
   return JSON.stringify(value.replaceAll("\\", "/"));
-}
-
-function runClaude({ cwd, args }) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(claudeCommand, args, {
-      cwd,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      if (process.platform === "win32" && child.pid) {
-        spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-          stdio: "ignore",
-          windowsHide: true,
-        });
-      } else {
-        child.kill("SIGKILL");
-      }
-    }, TIMEOUT_MS);
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal, stdout, stderr, timedOut });
-    });
-  });
-}
-
-function parseEvents(text) {
-  return text
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
-}
-
-function truncate(text) {
-  return text.length > 4_000 ? text.slice(-4_000) : text;
 }
 
 async function runAttempt() {
@@ -141,7 +80,7 @@ First run the Bash command 'sleep 3'. Then call the fixture_mark MCP tool exactl
     const parentExitedAt = Date.now();
     stdout = completed.stdout;
     stderr = completed.stderr;
-    events = parseEvents(await readFile(logPath, "utf8").catch(() => ""));
+    events = await readEvents(logPath);
 
     assert.equal(completed.timedOut, false, "Claude Code timed out");
     assert.equal(completed.code, 0, `Claude Code exited with ${completed.code}: ${stderr}`);

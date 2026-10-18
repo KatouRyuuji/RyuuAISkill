@@ -10,7 +10,7 @@ Claude Code 是首要目标平台；仓库同时保留 pstack 对其他 harness 
 
 - **入口集中**：通用工作流从同一个显式入口进入，不要求每个扩展都成为新的主入口。
 - **项目默认干净**：扩展 skill 正文和任务级 MCP 默认不加载、不连接；名称和描述可以作为元数据存在。
-- **任务隔离**：需要临时 MCP 的工作交给子代理，详细工具输出不进入主会话，子代理结束后 MCP 断开。
+- **任务隔离**：需要临时 MCP 的工作交给子代理或独立 `claude -p` 进程，详细工具输出不进入主会话，任务结束后 MCP 断开。
 - **复用成熟实现**：保留 poteto-mode 的 playbooks、principles、子代理和 `orch` 状态体系，不重写一套相似架构。
 
 ## 包含什么
@@ -21,7 +21,8 @@ Claude Code 是首要目标平台；仓库同时保留 pstack 对其他 harness 
 | [`/poteto-mode`](./skills/poteto-mode/SKILL.md) | 原有的完整工程编排入口，可独立使用 |
 | [`/storage-audit`](./skills/storage-audit/SKILL.md) | 只读分析目录冗余、缓存、压缩包副本和存储空间 |
 | [Scoped MCP 约定](./skills/ryuuji-ai-skill/references/scoped-mcp.md) | 使用项目子代理的 inline `mcpServers`，在任务期间连接 MCP |
-| [`tests/scoped-mcp`](./tests/scoped-mcp/) | 验证 inline MCP 的连接、调用和子代理结束断开 |
+| [独立 MCP 会话](./skills/ryuuji-ai-skill/references/independent-mcp.md) | 使用独立 `claude -p` 进程和显式 MCP 配置执行一次性任务 |
+| [`tests/scoped-mcp`](./tests/scoped-mcp/) | 验证两种隔离方式的 MCP 生命周期、权限和清理 |
 
 `/poteto-mode` 没有被 `/ryuuji-ai-skill` 替代。你可以继续直接使用它。
 
@@ -46,7 +47,7 @@ npx skills add KatouRyuuji/RyuuAISkill
 RyuuAI 目前这样路由：
 
 - 存储分析 → `storage-audit`。
-- 需要任务级 MCP → 对应的预注册项目 agent。
+- 需要任务级 MCP → 对应的预注册项目 agent 或独立 `claude -p` 进程。
 - 其他请求 → 只进入一次 `poteto-mode`。
 
 混合请求会先拆成明确任务，每个任务只路由一次。
@@ -68,6 +69,15 @@ RyuuAI 目前这样路由：
 
 完整的 agent 示例、工具白名单和首次连接等待方式见 [`scoped-mcp.md`](./skills/ryuuji-ai-skill/references/scoped-mcp.md)。已有的常驻 MCP 不受影响。
 
+### 使用独立 MCP 会话
+
+需要与当前会话分开的进程时，按 [`independent-mcp.md`](./skills/ryuuji-ai-skill/references/independent-mcp.md) 创建临时配置并运行 `claude -p`：
+
+- `--mcp-config` 与 `--strict-mcp-config` 只加载显式指定的 MCP。
+- 一次性任务使用 `--no-session-persistence`。
+- MCP-only 任务使用 `--tools ""` 禁用内置工具；`--allowedTools` 只负责权限放行，不是工具白名单。
+- 进程退出后确认 MCP 已停止，再删除临时配置和目录。
+
 ## 设计思路
 
 ### 薄入口，单次路由
@@ -78,9 +88,9 @@ RyuuAI 目前这样路由：
 
 扩展 skill 使用 `disable-model-invocation: true`。需要时才读取正文、references 或脚本，避免所有说明同时进入上下文。
 
-### 子代理拥有任务级 MCP 生命周期
+### 任务拥有 MCP 生命周期
 
-inline server 随子代理启动而连接、随子代理结束而断开。父会话保留自己的常驻 MCP，主流程负责路由、状态、审批和共享写入。
+inline server 随子代理启动而连接、随子代理结束而断开；独立进程只加载显式配置，并在退出时结束自己的 MCP。父会话保留自己的常驻 MCP，主流程负责路由、状态、审批和共享写入。
 
 ### 状态与编排复用 poteto
 
@@ -99,7 +109,7 @@ skills/
   poteto-mode/         # poteto 编排、playbooks 和状态脚本
   principle-*/         # poteto 原则叶子 skills
 agents/                # pstack 子代理定义
-tests/scoped-mcp/      # 本地 MCP 生命周期测试
+tests/scoped-mcp/      # 子代理与独立进程的 MCP 测试
 docs/guide/            # pstack 使用指南
 ```
 
@@ -112,6 +122,7 @@ npx --yes bun install --cwd skills/poteto-mode/scripts --frozen-lockfile
 npx --yes bun test --cwd skills/poteto-mode/scripts
 npx --yes bun run --cwd skills/poteto-mode/scripts typecheck
 node tests/scoped-mcp/run.mjs
+node tests/scoped-mcp/independent.mjs
 ```
 
 storage-audit 的 quick 只读采集示例：
