@@ -20,7 +20,7 @@ Claude Code 是首要目标平台；仓库同时保留 pstack 对其他 harness 
 | [`/ryuuji-ai-skill`](./skills/ryuuji-ai-skill/SKILL.md) | RyuuAI 的显式统一入口，负责扩展路由和 poteto-mode 回退 |
 | [`/poteto-mode`](./skills/poteto-mode/SKILL.md) | 原有的完整工程编排入口，可独立使用 |
 | [`/storage-audit`](./skills/storage-audit/SKILL.md) | 只读分析目录冗余、缓存、压缩包副本和存储空间 |
-| [`/agent-prompt-sync`](./skills/agent-prompt-sync/SKILL.md) | 维护唯一 Ryuuji 正本，以链接和平台增量同步实际 agent 的用户级提示词 |
+| [`/agent-prompt-sync`](./skills/agent-prompt-sync/SKILL.md) | 维护唯一 用户级提示词 正本，以链接和平台增量同步实际 agent 的用户级提示词 |
 | [Scoped MCP 约定](./skills/ryuuji-ai-skill/references/scoped-mcp.md) | 使用项目子代理的 inline `mcpServers`，在任务期间连接 MCP |
 | [独立 MCP 会话](./skills/ryuuji-ai-skill/references/independent-mcp.md) | 使用独立 `claude -p` 进程和显式 MCP 配置执行一次性任务 |
 | [`tests/scoped-mcp`](./tests/scoped-mcp/) | 验证两种隔离方式的 MCP 生命周期、权限和清理 |
