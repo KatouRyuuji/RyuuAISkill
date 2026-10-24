@@ -15,7 +15,6 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -76,22 +75,7 @@ function paths(home) {
     opencodeDelta: join(home, ".config", "opencode", "rules", "agent-prompt-sync.md"),
     opencodeConfig: join(home, ".config", "opencode", "opencode.json"),
     opencodeConfigJsonc: join(home, ".config", "opencode", "opencode.jsonc"),
-    cursorAccountDb: join(home, ".cursor", "User", "globalStorage", "state.vscdb"),
   };
-}
-
-async function writeCursorAccountRules(dbPath, value) {
-  await mkdir(dirname(dbPath), { recursive: true });
-  const db = new DatabaseSync(dbPath);
-  try {
-    db.exec("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value TEXT)");
-    db.prepare("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)").run(
-      "aicontext.personalContext",
-      value,
-    );
-  } finally {
-    db.close();
-  }
 }
 
 async function fixture() {
@@ -241,7 +225,6 @@ test("scan ignores empty directories and inventories all supported prompt layout
     const empty = await scan(context);
     assert.deepEqual(empty.agents, []);
     assert.deepEqual(empty.excludedAgents, []);
-    assert.deepEqual(empty.warnings, []);
 
     await setupAll(context);
     await writeFile(context.paths.codexOverride, "# Override\n", "utf8");
@@ -249,7 +232,6 @@ test("scan ignores empty directories and inventories all supported prompt layout
     await writeFile(context.paths.cursorDelta, "---\nalwaysApply: true\n---\n\n# Existing\n", "utf8");
     const result = await scan(context);
     assert.deepEqual(result.agents, ["claude-code", "codex", "cursor", "opencode"]);
-    assert.equal(result.warnings[0]?.code, "cursor-account-user-rules");
     const inventory = await readJson(context.inventory);
     assert.equal(inventory.states.codexOverride.content, "# Override\n");
     assert.equal(inventory.states.cursorLegacy.content, "# Current\n\nRemove this.\n");
@@ -327,8 +309,8 @@ test("preview is read-only and C applies only increments before a later A remove
     assert.equal(dryRun.valid, true);
     assert.deepEqual(await captureManaged(context, true), beforePreview);
     const report = await previewReport(dryRun);
-    assert.match(report, /Recommendation: C/);
-    assert.match(report, /A: \(empty\)/);
+    assert.match(report, /推荐分支：C/);
+    assert.match(report, /增量: \(empty\)/);
     assert.match(report, /# Claude increment/);
     assert.match(report, /Branch C — \d+ changes/);
     assert.match(report, /\+# Claude increment/);
@@ -680,7 +662,7 @@ test("excludedAgents skip that agent and survive a later scan", async () => {
     const plan = await completeScaffold(context);
     assert.equal("cursor" in plan.branches.A, false);
     const dryRun = await preview(context);
-    assert.match(await previewReport(dryRun), /cursor: unused residual/);
+    assert.match(await previewReport(dryRun), /cursor：unused residual/);
     outputJson(await apply(context, "A", dryRun.planDigest));
     assert.equal(await readFile(context.paths.cursorLegacy, "utf8"), cursorLegacy);
     await assertAbsent(context.paths.cursorCanonicalEntry);
@@ -730,33 +712,6 @@ test("cursor-only apply does not create the Claude canonical file", async () => 
   }
 });
 
-test("local Cursor account User Rules block apply until cleared and scanned again", async () => {
-  const context = await fixture();
-  try {
-    await mkdir(dirname(context.paths.cursorLegacy), { recursive: true });
-    await writeFile(context.paths.cursorLegacy, "# Cursor\n", "utf8");
-    await writeCursorAccountRules(context.paths.cursorAccountDb, "# Account rules\n");
-    const scanned = await scan(context);
-    assert.equal(scanned.warnings[0]?.code, "cursor-account-user-rules-block");
-    await completeScaffold(context);
-    const blockedPreview = await preview(context, 1);
-    assert.equal(blockedPreview.valid, false);
-    assert.match(await previewReport(blockedPreview), /Apply is refused/);
-    const blockedApply = await apply(context, "A", blockedPreview.planDigest, 1);
-    assert.match(blockedApply.stderr, /still have local content/);
-    await assertAbsent(context.paths.cursorCanonicalEntry);
-
-    await writeCursorAccountRules(context.paths.cursorAccountDb, "  ");
-    await scanAndScaffold(context);
-    const dryRun = await preview(context);
-    assert.equal(dryRun.valid, true);
-    outputJson(await apply(context, "A", dryRun.planDigest));
-    await assertLink(context.paths.cursorCanonicalEntry, context.paths.cursorCanonical);
-  } finally {
-    await rm(context.temporaryRoot, { recursive: true, force: true });
-  }
-});
-
 test("listing an agent as both detected and excluded is rejected", async () => {
   const context = await fixture();
   try {
@@ -773,6 +728,79 @@ test("listing an agent as both detected and excluded is rejected", async () => {
       context.plan,
     ], 1);
     assert.match(denied.stderr, /both detected and excluded/);
+  } finally {
+    await rm(context.temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("plan analysis and branch increments must agree", async () => {
+  const context = await fixture();
+  try {
+    await setupAll(context);
+    const plan = await scanAndScaffold(context);
+    plan.recommendation = "C";
+    plan.branches.C["claude-code"] = "# 语言\n- 总是用中文回答我。\n";
+    plan.branches.B["claude-code"] = "# 语言\n- 总是用中文回答我。\n";
+    plan.analysis.find((item) => item.agent === "claude-code").keep = ["总是用中文回答我"];
+    await writeJson(context.plan, plan);
+    await preview(context);
+
+    const keptMissingFromB = structuredClone(plan);
+    keptMissingFromB.analysis.find((item) => item.agent === "claude-code").keep = ["正本里没有的规则"];
+    await writeJson(context.plan, keptMissingFromB);
+    const keptDenied = invoke(["preview", "--plan", context.plan], 1);
+    assert.match(keptDenied.stderr, /analysis keep lists/);
+    assert.match(keptDenied.stderr, /branch B does not write it/);
+
+    const keptAlsoDropped = structuredClone(plan);
+    const claude = keptAlsoDropped.analysis.find((item) => item.agent === "claude-code");
+    claude.drop = ["总是用中文回答我"];
+    await writeJson(context.plan, keptAlsoDropped);
+    assert.match(invoke(["preview", "--plan", context.plan], 1).stderr, /both keep and drop/);
+
+    const cNotInKeep = structuredClone(plan);
+    cNotInKeep.analysis.find((item) => item.agent === "claude-code").keep = ["另一条规则"];
+    cNotInKeep.branches.B["claude-code"] = "# 语言\n- 另一条规则。\n- 总是用中文回答我。\n";
+    await writeJson(context.plan, cNotInKeep);
+    assert.match(invoke(["preview", "--plan", context.plan], 1).stderr, /keep has no matching sentence/);
+
+    const bMissingC = structuredClone(plan);
+    bMissingC.branches.B["claude-code"] = "# 语言\n- 完全不同的规则。\n";
+    await writeJson(context.plan, bMissingC);
+    assert.match(invoke(["preview", "--plan", context.plan], 1).stderr, /branch B must keep every rule branch C keeps/);
+  } finally {
+    await rm(context.temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("an empty rationale names the plan file and the offending agent", async () => {
+  const context = await fixture();
+  try {
+    await setupAll(context);
+    await scan(context);
+    outputJson(invoke(["scaffold", "--inventory", context.inventory, "--output", context.plan]));
+    const denied = invoke(["preview", "--plan", context.plan], 1);
+    assert.match(denied.stderr, /rationale/);
+    assert.match(denied.stderr, /claude-code/);
+    assert.match(denied.stderr, /plan-example\.md/);
+    assert.match(denied.stderr, /plan\.json/);
+  } finally {
+    await rm(context.temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("identical B and C branches are called out in the report", async () => {
+  const context = await fixture();
+  try {
+    await setupAll(context);
+    const plan = await scanAndScaffold(context);
+    plan.recommendation = "C";
+    plan.branches.C["claude-code"] = "# 语言\n- 总是用中文回答我。\n";
+    plan.branches.B["claude-code"] = "# 语言\n- 总是用中文回答我。\n";
+    plan.analysis.find((item) => item.agent === "claude-code").keep = ["总是用中文回答我"];
+    await writeJson(context.plan, plan);
+    const report = await previewReport(await preview(context));
+    assert.match(report, /B 和 C 的增量完全相同/);
   } finally {
     await rm(context.temporaryRoot, { recursive: true, force: true });
   }

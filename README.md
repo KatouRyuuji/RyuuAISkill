@@ -93,7 +93,7 @@ skill 以 [`ryuuji-user-prompt.md`](./skills/agent-prompt-sync/references/ryuuji
 - **B**：正本之外，保守保留非重复的现有规则。
 - **C**：正本之外，只保留最少必要的现有规则。
 
-Claude Code 使用原生用户规则保存增量，并清点未托管的 `~/.claude/rules/*.md`；Codex 使用机制生成的 composite；Cursor 使用本机 `.mdc` 规则，本地仍有账户 User Rules 时拒绝 apply；OpenCode 把增量写进 `opencode.jsonc`（若存在）否则 `opencode.json` 的 `instructions`。正本入口由 symlink 或 hardlink 维护，不靠手工复制。只有用户选择分支并再次确认后，才会备份并应用目标状态。模板只在你明确要求时更新。
+Claude Code 使用原生用户规则保存增量，并清点未托管的 `~/.claude/rules/*.md`；Codex 使用机制生成的 composite；Cursor 使用本机 `.mdc` 规则；OpenCode 把增量写进 `opencode.jsonc`（若存在）否则 `opencode.json` 的 `instructions`。正本入口由 symlink 或 hardlink 维护，不靠手工复制。只有用户选择分支并再次确认后，才会备份并应用目标状态。模板只在你明确要求时更新。
 
 ## 设计思路
 

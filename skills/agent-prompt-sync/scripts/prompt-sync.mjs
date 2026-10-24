@@ -16,7 +16,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const BRANCHES = ["A", "B", "C"];
@@ -394,85 +394,6 @@ function parseJsonDocument(raw, path) {
   }
 }
 
-function cursorAccountDbPath(root) {
-  if (resolve(root) === resolve(homedir())) {
-    if (process.platform === "win32") {
-      if (!process.env.APPDATA) return null;
-      return resolve(process.env.APPDATA, "Cursor/User/globalStorage/state.vscdb");
-    }
-    if (process.platform === "darwin") {
-      return resolve(homedir(), "Library/Application Support/Cursor/User/globalStorage/state.vscdb");
-    }
-    return resolve(homedir(), ".config/Cursor/User/globalStorage/state.vscdb");
-  }
-  return resolve(root, ".cursor/User/globalStorage/state.vscdb");
-}
-
-function cursorAccountRulesBlock(inventory) {
-  if (!inventory.agents.some((agent) => agent.id === "cursor")) return null;
-  if (!inventory.cursorAccountRules?.content) return null;
-  return "Cursor account User Rules still have local content; move keep rules into the increment, clear Customize → Rules, then scan again";
-}
-
-async function readCursorAccountRules(root) {
-  const result = {
-    path: null,
-    key: "aicontext.personalContext",
-    readable: false,
-    content: null,
-  };
-  const dbPath = cursorAccountDbPath(root);
-  if (!dbPath) return result;
-  result.path = dbPath;
-  try {
-    await lstat(dbPath);
-  } catch (error) {
-    if (error?.code === "ENOENT") return result;
-    throw error;
-  }
-  try {
-    const sqlite = await import("node:sqlite");
-    const db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
-    try {
-      const row = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get(result.key);
-      result.readable = true;
-      const value = row?.value;
-      if (typeof value === "string" && value.trim()) result.content = value;
-      else if (value instanceof Uint8Array && value.byteLength) {
-        result.content = decodeUtf8(Buffer.from(value), `${dbPath}#${result.key}`);
-      }
-    } finally {
-      db.close();
-    }
-  } catch (error) {
-    if (error instanceof Error && error.message.startsWith("Prompt content is not valid UTF-8")) {
-      throw error;
-    }
-    result.readable = false;
-    result.content = null;
-  }
-  return result;
-}
-
-function buildWarnings(inventory) {
-  const warnings = [];
-  const block = cursorAccountRulesBlock(inventory);
-  if (block) {
-    warnings.push({
-      agent: "cursor",
-      code: "cursor-account-user-rules-block",
-      message: `${block}. Apply is refused until they are empty.`,
-    });
-  } else if (inventory.agents.some((agent) => agent.id === "cursor")) {
-    warnings.push({
-      agent: "cursor",
-      code: "cursor-account-user-rules",
-      message: "No local Cursor account User Rules were captured. Check Customize → Rules after apply; cloud-synced rules are not writable here.",
-    });
-  }
-  return warnings;
-}
-
 function allowTestHooks(root) {
   return process.env.AGENT_PROMPT_SYNC_TEST_MODE === "1" && resolve(root) !== resolve(homedir());
 }
@@ -557,7 +478,6 @@ async function scan(options) {
   }
   const cursorUnmanagedRules = await scanCursorUnmanagedRules(paths);
   const claudeUnmanagedRules = await scanClaudeUnmanagedRules(paths);
-  const cursorAccountRules = await readCursorAccountRules(root);
   const detected = [];
 
   for (const definition of agents) {
@@ -570,7 +490,7 @@ async function scan(options) {
     if (definition.id === "codex") byPrompt = states.codexBase.exists || states.codexOverride.exists;
     if (definition.id === "cursor") {
       byPrompt = states.cursorLegacy.exists || states.cursorCanonicalEntry.exists ||
-        states.cursorDelta.exists || cursorUnmanagedRules.length > 0 || Boolean(cursorAccountRules.content);
+        states.cursorDelta.exists || cursorUnmanagedRules.length > 0;
     }
     if (definition.id === "opencode") byPrompt = states.opencodeEntry.exists;
     if (!byPrompt && !byCommand) continue;
@@ -578,16 +498,6 @@ async function scan(options) {
     let preserved = [];
     if (definition.id === "cursor") {
       preserved = [...cursorUnmanagedRules];
-      if (cursorAccountRules.content) {
-        preserved.push({
-          exists: true,
-          kind: "account-user-rules",
-          path: `${cursorAccountRules.path}#${cursorAccountRules.key}`,
-          sha256: sha256(cursorAccountRules.content),
-          content: cursorAccountRules.content,
-          textValid: true,
-        });
-      }
     } else if (definition.id === "claude-code") {
       preserved = claudeUnmanagedRules;
     }
@@ -617,10 +527,8 @@ async function scan(options) {
     states,
     agents: detected,
     excludedAgents,
-    cursorAccountRules,
     unsupportedAgents,
   };
-  const warnings = buildWarnings(inventory);
   const inventorySha256 = await writeJson(output, inventory);
   console.log(JSON.stringify({
     schema: "agent-prompt-sync-scan-result/3",
@@ -629,7 +537,6 @@ async function scan(options) {
     agents: detected.map((agent) => agent.id),
     excludedAgents: excludedAgents.map((item) => item.id),
     unsupportedAgents,
-    warnings,
   }, null, 2));
 }
 
@@ -696,25 +603,95 @@ async function scaffold(options) {
   }, null, 2));
 }
 
-function validateAnalysis(plan, agentIds) {
+function validateAnalysis(plan, agentIds, planPath) {
+  const where = `plan ${planPath}`;
   if (!["A", "C"].includes(plan.recommendation)) {
-    throw new Error("Recommendation must be A or C; present B without recommending it");
+    throw new Error(
+      `${where}: recommendation is "${plan.recommendation}". Set analysis[i].recommendation to "A" or "C". `
+      + "Branch B is shown but never recommended.",
+    );
   }
-  if (!Array.isArray(plan.analysis)) throw new Error("Plan analysis must be an array");
+  if (!Array.isArray(plan.analysis)) throw new Error(`${where}: analysis must be an array, one entry per detected agent`);
   const analyzed = new Set();
-  for (const item of plan.analysis) {
-    if (!agentIds.includes(item.agent)) throw new Error(`Analysis references unknown agent: ${item.agent}`);
-    if (analyzed.has(item.agent)) throw new Error(`Duplicate analysis for ${item.agent}`);
+  plan.analysis.forEach((item, index) => {
+    const at = `analysis[${index}]`;
+    if (!agentIds.includes(item.agent)) {
+      throw new Error(
+        `${where}: ${at}.agent is "${item.agent}". Detected agents: ${agentIds.join(", ")}.`,
+      );
+    }
+    if (analyzed.has(item.agent)) throw new Error(`${where}: analysis lists ${item.agent} twice`);
     if (!Array.isArray(item.keep) || !Array.isArray(item.drop)) {
-      throw new Error(`Analysis keep/drop must be arrays for ${item.agent}`);
+      throw new Error(
+        `${where}: ${at} (agent ${item.agent}) needs both keep and drop as arrays of rule sentences. Use [] when empty.`,
+      );
     }
     if (typeof item.rationale !== "string" || !item.rationale.trim() || item.rationale.startsWith("TODO")) {
-      throw new Error(`Complete the analysis rationale for ${item.agent}`);
+      throw new Error(
+        `${where}: ${at}.rationale (agent ${item.agent}) is still empty or starts with TODO. `
+        + `Write one sentence explaining the classification. See references/plan-example.md for a filled example.`,
+      );
     }
     analyzed.add(item.agent);
-  }
+  });
   for (const id of agentIds) {
-    if (!analyzed.has(id)) throw new Error(`Missing analysis for ${id}`);
+    if (!analyzed.has(id)) throw new Error(`${where}: analysis has no entry for ${id}. Add { "agent": "${id}", "keep": [], "drop": [], "rationale": "..." }`);
+  }
+}
+
+function ruleLines(increment) {
+  if (!increment) return [];
+  return increment
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#") && line !== "---");
+}
+
+function normalizeRule(text) {
+  return String(text)
+    .replace(/^\s*[-*]\s+/, "")
+    .replace(/^\s*\d+\.\s+/, "")
+    .replace(/[，。；：、！？,.;:!?「」『』"'\s]/g, "")
+    .toLowerCase();
+}
+
+function sameRule(left, right) {
+  const a = normalizeRule(left);
+  const b = normalizeRule(right);
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+function validateAnalysisAgainstBranches(plan, agentIds, planPath) {
+  for (const id of agentIds) {
+    const item = plan.analysis.find((entry) => entry.agent === id);
+    const savedByC = ruleLines(plan.branches.C[id]);
+    const savedByB = ruleLines(plan.branches.B[id]);
+    const kept = item.keep;
+    const dropped = item.drop;
+
+    for (const rule of kept) {
+      if (!savedByB.some((line) => sameRule(line, rule))) {
+        throw new Error(
+          `plan ${planPath}: analysis keep lists "${rule}" for ${id}, but branch B does not write it. `
+          + "Anything kept must appear in the branch increments. See references/plan-example.md.",
+        );
+      }
+      if (dropped.some((rule2) => sameRule(rule2, rule))) {
+        throw new Error(
+          `plan ${planPath}: ${id} lists "${rule}" in both keep and drop. Keep one side only.`,
+        );
+      }
+    }
+
+    for (const line of savedByC) {
+      if (!kept.some((rule) => sameRule(line, rule))) {
+        throw new Error(
+          `plan ${planPath}: branch C writes "${line}" for ${id}, but analysis keep has no matching sentence. `
+          + "Add it to keep or remove it from branch C.",
+        );
+      }
+    }
   }
 }
 
@@ -729,7 +706,7 @@ async function loadPlan(path) {
     throw new Error("Plan excludedAgents must match the inventory");
   }
   const agentIds = inventory.agents.map((agent) => agent.id).sort();
-  validateAnalysis(plan, agentIds);
+  validateAnalysis(plan, agentIds, path);
 
   for (const branch of BRANCHES) {
     const content = plan.branches?.[branch];
@@ -750,6 +727,17 @@ async function loadPlan(path) {
       }
     }
   }
+  for (const id of agentIds) {
+    const keptByC = ruleLines(plan.branches.C[id]);
+    const keptByB = ruleLines(plan.branches.B[id]);
+    const missing = keptByC.filter((line) => !keptByB.some((other) => sameRule(other, line)));
+    if (missing.length) {
+      throw new Error(
+        `plan ${path}: branch B must keep every rule branch C keeps for ${id}. Missing: ${missing.join(" | ")}`,
+      );
+    }
+  }
+  validateAnalysisAgainstBranches(plan, agentIds, path);
   return { plan, inventory, planDigest: loaded.sha256 };
 }
 
@@ -1009,81 +997,120 @@ function briefDiff(oldText, newText, maxLines) {
   return out.join("\n") || "(content unchanged)";
 }
 
-function snippet(text, maxLines) {
-  if (!text) return "(empty)";
-  const lines = text.split("\n");
-  if (lines.length && lines[lines.length - 1] === "") lines.pop();
-  if (lines.length === 0) return "(empty)";
-  if (lines.length <= maxLines) return lines.join("\n");
-  return `${lines.slice(0, maxLines).join("\n")}\n... (${lines.length - maxLines} more lines)`;
-}
-
 function changedOperations(operations) {
   return operations.filter((operation) => operation.action !== "unchanged");
 }
 
-function renderOperationDiff(operation) {
+function shortenPath(path, root) {
+  const base = resolve(root);
+  const full = resolve(path);
+  const slash = (value) => value.split(sep).join("/");
+  if (full === base) return "~";
+  if (full.startsWith(base + sep)) return `~${slash(full.slice(base.length))}`;
+  return slash(path);
+}
+
+function derivedLabel(operation, plan, branch, templateContent) {
+  if (operation.kind !== "file") return null;
+  const text = operation.content.toString("utf8");
+  if (text === templateContent) return "正本原文";
+  if (text === `${CURSOR_FRONTMATTER}${templateContent}`) return "正本原文加 alwaysApply 头";
+  const increment = plan.branches[branch][operation.agent];
+  if (increment && text === compose(templateContent, increment)) return "正本原文加本分支增量";
+  return null;
+}
+
+function renderOperation(operation, plan, branch, templateContent, root) {
+  const path = shortenPath(operation.path, root);
   if (operation.kind === "link") {
-    return `link → ${operation.targetPath}${operation.reason ? ` (${operation.reason})` : ""}`;
+    return `  - ${operation.action} \`${path}\` (link → \`${shortenPath(operation.targetPath, root)}\`)${operation.reason ? ` — ${operation.reason}` : ""}`;
   }
-  if (operation.kind === "check") return "leave existing config as-is";
-  return briefDiff(currentText(operation), desiredText(operation), 50);
+  if (operation.action === "conflict") {
+    return `  - conflict \`${path}\` — 扫描后该文件已变，需要重新 scan`;
+  }
+  if (operation.kind === "check") return `  - ${operation.action} \`${path}\` (保持原配置)`;
+  if (operation.kind === "absent") return `  - ${operation.action} \`${path}\` (删除)`;
+  const label = derivedLabel(operation, plan, branch, templateContent);
+  if (label) return `  - ${operation.action} \`${path}\` — ${label}`;
+  const diff = briefDiff(currentText(operation), desiredText(operation), 40);
+  return `  - ${operation.action} \`${path}\`
+
+\`\`\`diff
+${diff}
+\`\`\``;
+}
+
+function renderList(label, items) {
+  if (!items.length) return [`  - ${label}：无`];
+  return [`  - ${label}：`, ...items.map((item) => `    - ${item}`)];
 }
 
 function renderReport(plan, inventory, branchOperations, planDigest, valid) {
-  const warnings = buildWarnings(inventory);
+  const templateContent = inventory.template.content;
+  const root = plan.root;
   const lines = [
     "# agent-prompt-sync dry-run",
     "",
-    `Recommendation: ${plan.recommendation}`,
-    `planDigest: ${planDigest}`,
-    `valid: ${valid}`,
+    `推荐分支：${plan.recommendation}`,
+    `planDigest：${planDigest}`,
+    `valid：${valid}`,
     "",
   ];
-  if (warnings.length) {
-    lines.push("## Warnings");
-    for (const warning of warnings) lines.push(`- ${warning.message}`);
-    lines.push("");
-  }
   if (inventory.excludedAgents.length) {
-    lines.push("## Excluded agents");
-    for (const item of inventory.excludedAgents) lines.push(`- ${item.id}: ${item.reason}`);
+    lines.push("## 已排除");
+    for (const item of inventory.excludedAgents) lines.push(`- ${item.id}：${item.reason}`);
     lines.push("");
   }
-  lines.push("## Analysis");
+  lines.push("## 分析");
   for (const item of plan.analysis) {
-    lines.push(`- ${item.agent}: keep ${item.keep.length}, drop ${item.drop.length}. ${item.rationale}`);
+    lines.push(`- ${item.agent}`);
+    lines.push(`  - 理由：${item.rationale}`);
+    lines.push(...renderList("保留", item.keep));
+    lines.push(...renderList("丢弃", item.drop));
   }
   lines.push("");
-  lines.push("## Increments");
-  for (const id of inventory.agents.map((agent) => agent.id)) {
-    lines.push(`- ${id}`);
-    for (const branch of BRANCHES) {
-      const body = snippet(plan.branches[branch][id], 20);
-      if (body === "(empty)") {
-        lines.push(`  ${branch}: (empty)`);
-      } else {
-        lines.push(`  ${branch}:`);
-        for (const line of body.split("\n")) lines.push(`    ${line}`);
-      }
-    }
+
+  const canonicalOperation = branchOperations.A.find((operation) => operation.role === "canonical");
+  if (canonicalOperation && canonicalOperation.action !== "unchanged") {
+    lines.push(`## 正本 \`${shortenPath(canonicalOperation.path, root)}\`（三版相同）`);
+    lines.push("");
+    lines.push("```diff");
+    lines.push(briefDiff(currentText(canonicalOperation), desiredText(canonicalOperation), 60));
+    lines.push("```");
+    lines.push("");
   }
-  lines.push("");
+
+  const bEqualsC = inventory.agents.every((agent) => plan.branches.B[agent.id] === plan.branches.C[agent.id]);
+  if (bEqualsC && inventory.agents.some((agent) => plan.branches.C[agent.id])) {
+    lines.push("## 注意");
+    lines.push("");
+    lines.push("B 和 C 的增量完全相同，实际只有两个选项。把 B 改成更保守的版本，或直接把 `recommendation` 设为 C 并说明二者等价。");
+    lines.push("");
+  }
+
   for (const branch of BRANCHES) {
-    const changed = changedOperations(branchOperations[branch]);
-    const showDiffs = branch === plan.recommendation;
-    lines.push(`## Branch ${branch} — ${changed.length} change${changed.length === 1 ? "" : "s"} (${branchOperations[branch].every((operation) => operation.action !== "conflict") ? "valid" : "conflict"})`);
-    if (changed.length === 0) {
-      lines.push("- no file changes");
-      lines.push("");
-      continue;
-    }
+    const operations = branchOperations[branch];
+    const changed = changedOperations(operations);
+    const state = operations.every((operation) => operation.action !== "conflict") ? "valid" : "conflict";
+    const title = branch === plan.recommendation ? `推荐` : `备选`;
+    lines.push(`## Branch ${branch} — ${changed.length} change${changed.length === 1 ? "" : "s"} (${state}, ${title})`);
+    const byAgent = new Map();
     for (const operation of changed) {
-      lines.push(`- ${operation.action} \`${operation.path}\` (${operation.kind}${operation.agent ? `, ${operation.agent}` : ""})`);
-      if (showDiffs) {
-        lines.push("```diff");
-        lines.push(renderOperationDiff(operation));
-        lines.push("```");
+      const key = operation.agent ?? "共享";
+      if (!byAgent.has(key)) byAgent.set(key, []);
+      byAgent.get(key).push(operation);
+    }
+    for (const agent of inventory.agents.map((item) => item.id)) {
+      const agentOperations = byAgent.get(agent) ?? [];
+      const increment = plan.branches[branch][agent];
+      lines.push(`- ${agent}`);
+      if (!increment) lines.push("  - 增量: (empty)");
+      if (!agentOperations.length) {
+        if (increment) lines.push("  - 无文件改动");
+        continue;
+      }
+      for (const operation of agentOperations) {
+        lines.push(renderOperation(operation, plan, branch, templateContent, root));
       }
     }
     lines.push("");
@@ -1102,7 +1129,6 @@ async function preview(options) {
     valid &&= branchValid;
     branchOperations[branch] = operations;
   }
-  valid &&= !cursorAccountRulesBlock(inventory);
   const report = renderReport(plan, inventory, branchOperations, planDigest, valid);
   const reportPath = resolve(dirname(planPath), `${basename(planPath, ".json")}.preview.md`);
   await writeAtomic(reportPath, report);
@@ -1111,7 +1137,6 @@ async function preview(options) {
     planDigest,
     recommendation: plan.recommendation,
     valid,
-    warnings: buildWarnings(inventory),
     reportPath,
   }, null, 2));
   if (!valid) process.exitCode = 1;
@@ -1399,8 +1424,6 @@ async function apply(options) {
     const { plan, inventory, planDigest } = await loadPlan(planPath);
     if (confirmation !== planDigest) throw new Error("Confirmation digest does not match this plan");
     const operations = await evaluateBranch(plan, inventory, branch);
-    const cursorBlock = cursorAccountRulesBlock(inventory);
-    if (cursorBlock) throw new Error(cursorBlock);
     const conflicts = operations.filter((operation) => operation.action === "conflict");
     if (conflicts.length) {
       throw new Error(`Files changed after scanning: ${conflicts.map((operation) => operation.role).join(", ")}`);
