@@ -25,11 +25,13 @@ disable-model-invocation: true
 | Agent | 正本入口 | 托管增量 |
 |---|---|---|
 | Claude Code | `~/.claude/CLAUDE.md` 就是正本文件 | `~/.claude/rules/agent-prompt-sync.md` |
-| Codex | `~/.codex/AGENTS.md` 链接到 `~/.agent-prompt-sync/generated/codex/AGENTS.md`。该文件是正本加增量 | 增量只存在于这份生成的 composite 里 |
-| Cursor | `~/.cursor/rules/ryuuji.mdc` 链接到生成的 `alwaysApply: true` 包装文件 | `~/.cursor/rules/agent-prompt-sync.mdc` |
+| Codex | 增量为空时，`~/.codex/AGENTS.md` 硬链接到 `~/.claude/CLAUDE.md`。Codex 不展开 `@`，只读这一份全局文件 | 增量非空时才写入 `~/.agent-prompt-sync/generated/codex/AGENTS.md`，入口改链到这份 composite，不再同时链向正本 |
+| Cursor | `~/.cursor/rules/ryuuji.mdc` 链接到生成文件。生成文件是 `alwaysApply: true` 加正本正文。Cursor 不把 `@` 读进上下文 | `~/.cursor/rules/agent-prompt-sync.mdc` |
 | OpenCode | `~/.config/opencode/AGENTS.md` 链接到 `~/.agent-prompt-sync/generated/opencode/AGENTS.md`。该文件是正本内容 | `~/.config/opencode/rules/agent-prompt-sync.md`。存在 `opencode.jsonc` 时，用绝对路径登记进它的 `instructions`；否则登记进 `opencode.json` 的 `instructions` |
 
 增量内容为空时，对应的托管增量文件不存在。
+
+Claude Code 加载用户正本，也加载祖先目录上的 `CLAUDE.md` 和 `AGENTS.md`。不要在祖先目录再放一份同样的正文，否则会和 `~/.claude/CLAUDE.md` 一起加载。Cursor 3.18 只从项目目录向上扫到盘符根；`~/.cursor/rules` 不在这条链上时不会加载。规则正文必须写在扫得到的 `.mdc` 里。
 
 ## 保持不动
 

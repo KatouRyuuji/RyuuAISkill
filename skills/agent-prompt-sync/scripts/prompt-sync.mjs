@@ -814,12 +814,14 @@ function buildOperations(plan, inventory, branch, templateContent) {
     if (id === "claude-code") {
       deltaFile("claudeDelta", id, increment);
     } else if (id === "codex") {
-      file("codexComposite", id, compose(templateContent, increment));
       const baseExists = inventory.states.codexBase.exists;
       const overrideExists = inventory.states.codexOverride.exists;
-      if (baseExists || !overrideExists) link("codexBase", id, "codexComposite");
+      const targetRole = increment ? "codexComposite" : "canonical";
+      if (increment) file("codexComposite", id, compose(templateContent, increment));
+      else absent("codexComposite", id);
+      if (baseExists || !overrideExists) link("codexBase", id, targetRole);
       else absent("codexBase", id);
-      if (overrideExists) link("codexOverride", id, "codexComposite");
+      if (overrideExists) link("codexOverride", id, targetRole);
       else absent("codexOverride", id);
     } else if (id === "cursor") {
       file("cursorCanonical", id, `${CURSOR_FRONTMATTER}${templateContent}`);
