@@ -513,7 +513,7 @@ async function scan(options) {
   const unsupportedAgents = detectCommands
     ? unsupportedCommands.filter(commandExists).map((command) => ({
         command,
-        reason: "No verified user-level prompt mapping; leave unchanged",
+        reason: "没有经核实的用户级提示词映射，保持不动",
       }))
     : [];
   const inventory = {
@@ -896,7 +896,7 @@ async function evaluateBranch(plan, inventory, branch) {
     if (!["create", "update"].includes(targetOperation?.action)) continue;
     if (sameFile(operation.current, currentStates[operation.targetRole])) {
       operation.action = "update";
-      operation.reason = "Refresh hardlink after replacing its target";
+      operation.reason = "目标文件被替换，刷新硬链接";
     }
   }
   return operations;
@@ -1022,40 +1022,116 @@ function derivedLabel(operation, plan, branch, templateContent) {
   return null;
 }
 
+function actionLabel(action) {
+  return { update: "更新", create: "新建", delete: "删除" }[action] ?? action;
+}
+
+function agentLabel(operation) {
+  return operation.agent ?? "共享";
+}
+
+function tableCell(text) {
+  return String(text).replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ");
+}
+
+function operationSignature(operation) {
+  return [
+    operation.role,
+    operation.agent ?? "",
+    operation.action,
+    operation.kind,
+    operation.desiredSha256 ?? "",
+  ].join("|");
+}
+
 function renderOperation(operation, plan, branch, templateContent, root) {
   const path = shortenPath(operation.path, root);
-  if (operation.kind === "link") {
-    return `  - ${operation.action} \`${path}\` (link → \`${shortenPath(operation.targetPath, root)}\`)${operation.reason ? ` — ${operation.reason}` : ""}`;
-  }
   if (operation.action === "conflict") {
-    return `  - conflict \`${path}\` — 扫描后该文件已变，需要重新 scan`;
+    return `- 冲突 \`${path}\` — 扫描后该文件已变，需要重新 scan`;
   }
-  if (operation.kind === "check") return `  - ${operation.action} \`${path}\` (保持原配置)`;
-  if (operation.kind === "absent") return `  - ${operation.action} \`${path}\` (删除)`;
+  if (operation.kind === "link") {
+    return `- ${actionLabel(operation.action)} \`${path}\`（链接到 \`${shortenPath(operation.targetPath, root)}\`）${operation.reason ? ` — ${operation.reason}` : ""}`;
+  }
+  if (operation.kind === "check") return `- 保持原配置 \`${path}\``;
   const label = derivedLabel(operation, plan, branch, templateContent);
-  if (label) return `  - ${operation.action} \`${path}\` — ${label}`;
+  if (label && operation.role !== "canonical") return `- ${actionLabel(operation.action)} \`${path}\` — ${label}`;
   const diff = briefDiff(currentText(operation), desiredText(operation), 40);
-  return `  - ${operation.action} \`${path}\`
+  return `- ${actionLabel(operation.action)} \`${path}\`
 
 \`\`\`diff
 ${diff}
 \`\`\``;
 }
 
-function renderList(label, items) {
-  if (!items.length) return [`  - ${label}：无`];
-  return [`  - ${label}：`, ...items.map((item) => `    - ${item}`)];
+function renderGrouped(operations, plan, branch, templateContent, root) {
+  const lines = [];
+  for (const agentId of [...new Set(operations.map(agentLabel))]) {
+    lines.push(`### ${agentId}`, "");
+    for (const operation of operations.filter((item) => agentLabel(item) === agentId)) {
+      lines.push(renderOperation(operation, plan, branch, templateContent, root));
+    }
+    lines.push("");
+  }
+  return lines;
 }
 
-function renderReport(plan, inventory, branchOperations, planDigest, valid) {
+function groupBranches(branchOperations) {
+  const groups = [];
+  for (const branch of BRANCHES) {
+    const operations = changedOperations(branchOperations[branch]);
+    const signature = operations.map(operationSignature).sort().join("\n");
+    const existing = groups.find((group) => group.signature === signature);
+    if (existing) {
+      existing.branches.push(branch);
+    } else {
+      groups.push({ signature, branches: [branch], operations });
+    }
+  }
+  return groups;
+}
+
+function sharedSignatures(branchOperations) {
+  const sets = BRANCHES.map((branch) => new Set(changedOperations(branchOperations[branch]).map(operationSignature)));
+  return new Set([...sets[0]].filter((signature) => sets.every((set) => set.has(signature))));
+}
+
+function branchAgentState(plan, operations, branch, agentId) {
+  const own = operations.filter((operation) => operation.agent === agentId);
+  if (own.some((operation) => operation.action === "conflict")) return "冲突";
+  const increment = plan.branches[branch][agentId];
+  const count = ruleLines(increment).length;
+  if (count) return `正本 + ${count} 条`;
+  if (increment.trim()) return "正本 + 增量";
+  return own.length ? "正本原文" : "不变";
+}
+
+function renderAnalysis(plan) {
+  const lines = ["## 分析", ""];
+  for (const item of plan.analysis) {
+    lines.push(`### ${item.agent}`, "");
+    lines.push(`理由：${item.rationale}`, "");
+    if (!item.keep.length && !item.drop.length) continue;
+    lines.push("| 判定 | 规则原文 |");
+    lines.push("|---|---|");
+    for (const rule of item.keep) lines.push(`| 保留 | ${tableCell(rule)} |`);
+    for (const rule of item.drop) lines.push(`| 丢弃 | ${tableCell(rule)} |`);
+    lines.push("");
+  }
+  return lines;
+}
+
+function renderReport(plan, inventory, branchOperations, valid) {
   const templateContent = inventory.template.content;
   const root = plan.root;
+  const groups = groupBranches(branchOperations);
+  const shared = sharedSignatures(branchOperations);
+  const recommendedGroup = groups.find((group) => group.branches.includes(plan.recommendation));
+  const agentIds = inventory.agents.map((agent) => agent.id);
   const lines = [
     "# agent-prompt-sync dry-run",
     "",
-    `推荐分支：${plan.recommendation}`,
-    `planDigest：${planDigest}`,
-    `valid：${valid}`,
+    `推荐分支：${recommendedGroup.branches.join("、")}`,
+    `分支状态：${valid ? "可以 apply" : "不能 apply，扫描后文件已变，需要重新 scan 并生成新计划"}`,
     "",
   ];
   if (inventory.excludedAgents.length) {
@@ -1063,60 +1139,45 @@ function renderReport(plan, inventory, branchOperations, planDigest, valid) {
     for (const item of inventory.excludedAgents) lines.push(`- ${item.id}：${item.reason}`);
     lines.push("");
   }
-  lines.push("## 分析");
-  for (const item of plan.analysis) {
-    lines.push(`- ${item.agent}`);
-    lines.push(`  - 理由：${item.rationale}`);
-    lines.push(...renderList("保留", item.keep));
-    lines.push(...renderList("丢弃", item.drop));
+  if (groups.length < BRANCHES.length) {
+    const merged = groups.filter((group) => group.branches.length > 1);
+    lines.push("## 注意");
+    lines.push("");
+    for (const group of merged) {
+      lines.push(`${group.branches.join("、")} 的改动完全相同，实际只有 ${groups.length} 个选项。`);
+    }
+    lines.push("");
+  }
+
+  lines.push("## 选项对比", "");
+  lines.push(`| 选项 | ${agentIds.join(" | ")} |`);
+  lines.push(`|---|${agentIds.map(() => "---").join("|")}|`);
+  for (const group of groups) {
+    const branch = group.branches[0];
+    const title = group.branches.includes(plan.recommendation) ? "（推荐）" : "";
+    const cells = agentIds.map((id) => branchAgentState(plan, group.operations, branch, id));
+    lines.push(`| ${group.branches.join("、")}${title} | ${cells.join(" | ")} |`);
   }
   lines.push("");
 
-  const canonicalOperation = branchOperations.A.find((operation) => operation.role === "canonical");
-  if (canonicalOperation && canonicalOperation.action !== "unchanged") {
-    lines.push(`## 正本 \`${shortenPath(canonicalOperation.path, root)}\`（三版相同）`);
+  const sharedOperations = changedOperations(branchOperations.A).filter((operation) => shared.has(operationSignature(operation)));
+  if (sharedOperations.length) {
+    lines.push(`## 不受选择影响 · ${sharedOperations.length} 处`);
     lines.push("");
-    lines.push("```diff");
-    lines.push(briefDiff(currentText(canonicalOperation), desiredText(canonicalOperation), 60));
-    lines.push("```");
-    lines.push("");
+    lines.push(...renderGrouped(sharedOperations, plan, "A", templateContent, root));
   }
 
-  const bEqualsC = inventory.agents.every((agent) => plan.branches.B[agent.id] === plan.branches.C[agent.id]);
-  if (bEqualsC && inventory.agents.some((agent) => plan.branches.C[agent.id])) {
-    lines.push("## 注意");
+  for (const group of groups) {
+    const branch = group.branches[0];
+    const title = group.branches.includes(plan.recommendation) ? "（推荐）" : "";
+    const own = group.operations.filter((operation) => !shared.has(operationSignature(operation)));
+    if (!own.length) continue;
+    lines.push(`## 选项 ${group.branches.join("、")}${title} · 另有 ${own.length} 处改动`);
     lines.push("");
-    lines.push("B 和 C 的增量完全相同，实际只有两个选项。把 B 改成更保守的版本，或直接把 `recommendation` 设为 C 并说明二者等价。");
-    lines.push("");
+    lines.push(...renderGrouped(own, plan, branch, templateContent, root));
   }
 
-  for (const branch of BRANCHES) {
-    const operations = branchOperations[branch];
-    const changed = changedOperations(operations);
-    const state = operations.every((operation) => operation.action !== "conflict") ? "valid" : "conflict";
-    const title = branch === plan.recommendation ? `推荐` : `备选`;
-    lines.push(`## Branch ${branch} — ${changed.length} change${changed.length === 1 ? "" : "s"} (${state}, ${title})`);
-    const byAgent = new Map();
-    for (const operation of changed) {
-      const key = operation.agent ?? "共享";
-      if (!byAgent.has(key)) byAgent.set(key, []);
-      byAgent.get(key).push(operation);
-    }
-    for (const agent of inventory.agents.map((item) => item.id)) {
-      const agentOperations = byAgent.get(agent) ?? [];
-      const increment = plan.branches[branch][agent];
-      lines.push(`- ${agent}`);
-      if (!increment) lines.push("  - 增量: (empty)");
-      if (!agentOperations.length) {
-        if (increment) lines.push("  - 无文件改动");
-        continue;
-      }
-      for (const operation of agentOperations) {
-        lines.push(renderOperation(operation, plan, branch, templateContent, root));
-      }
-    }
-    lines.push("");
-  }
+  lines.push(...renderAnalysis(plan));
   return `${lines.join("\n").trim()}\n`;
 }
 
@@ -1131,7 +1192,7 @@ async function preview(options) {
     valid &&= branchValid;
     branchOperations[branch] = operations;
   }
-  const report = renderReport(plan, inventory, branchOperations, planDigest, valid);
+  const report = renderReport(plan, inventory, branchOperations, valid);
   const reportPath = resolve(dirname(planPath), `${basename(planPath, ".json")}.preview.md`);
   await writeAtomic(reportPath, report);
   console.log(JSON.stringify({

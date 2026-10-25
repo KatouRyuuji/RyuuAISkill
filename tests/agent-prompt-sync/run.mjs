@@ -310,13 +310,16 @@ test("preview is read-only and C applies only increments before a later A remove
     assert.deepEqual(await captureManaged(context, true), beforePreview);
     const report = await previewReport(dryRun);
     assert.match(report, /推荐分支：C/);
-    assert.match(report, /增量: \(empty\)/);
-    assert.match(report, /# Claude increment/);
-    assert.match(report, /Branch C — \d+ changes/);
+    assert.match(report, /分支状态：可以 apply/);
+    assert.match(report, /\| C（推荐） \| [^\n]*正本 \+ 增量[^\n]*\|/);
+    assert.match(report, /A、B 的改动完全相同，实际只有 2 个选项/);
     assert.match(report, /\+# Claude increment/);
-    const branchA = Number(report.match(/## Branch A — (\d+) change/)[1]);
-    const branchC = Number(report.match(/## Branch C — (\d+) change/)[1]);
-    assert.ok(branchC > branchA);
+    assert.doesNotMatch(report, /\(empty\)/);
+    assert.doesNotMatch(report, /Branch [ABC]/);
+    assert.match(report, /## 不受选择影响 · \d+ 处/);
+    assert.match(report, /## 选项 C（推荐） · 另有 \d+ 处改动/);
+    assert.doesNotMatch(report, /## 选项 A、B/);
+    assert.ok(report.indexOf("## 选项对比") < report.indexOf("## 分析"));
     const applied = outputJson(await apply(context, "C", dryRun.planDigest));
     const p = context.paths;
 
@@ -413,7 +416,8 @@ test("wrong confirmation and post-scan edits are rejected without writes", async
     const conflict = await preview(context, 1);
     assert.equal(conflict.valid, false);
     const conflictReport = await previewReport(conflict);
-    assert.match(conflictReport, /conflict/);
+    assert.match(conflictReport, /冲突 /);
+    assert.match(conflictReport, /分支状态：不能 apply/);
     assert.match(conflictReport, /CLAUDE\.md/);
     const deniedApply = await apply(context, "A", conflict.planDigest, 1);
     assert.match(deniedApply.stderr, /Files changed after scanning/);
@@ -800,7 +804,7 @@ test("identical B and C branches are called out in the report", async () => {
     plan.analysis.find((item) => item.agent === "claude-code").keep = ["总是用中文回答我"];
     await writeJson(context.plan, plan);
     const report = await previewReport(await preview(context));
-    assert.match(report, /B 和 C 的增量完全相同/);
+    assert.match(report, /B、C 的改动完全相同/);
   } finally {
     await rm(context.temporaryRoot, { recursive: true, force: true });
   }
