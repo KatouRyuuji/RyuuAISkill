@@ -168,6 +168,7 @@ export interface ResolveGateParams {
 export interface SetFrontierParams {
   readonly repo: string;
   readonly forge?: Forge;
+  readonly baseBranch?: string;
   readonly prs?: readonly number[];
 }
 
@@ -1113,15 +1114,19 @@ function branchPullRequest({
   repo: string;
 }): ForgePullRequest {
   const rows = listPullRequests({ filter: "--head", branch, forge, repo });
-  const row = rows[0];
+  // A branch may have closed or merged historical PRs after stack surgery.
+  // Prefer its sole active PR, but retain historical anchors when none is open.
+  const active = rows.filter((row) => row.state === "OPEN");
+  const candidates = active.length > 0 ? active : rows;
+  const row = candidates[0];
   if (row === undefined) {
     throw new UserError(
       `branch ${branch} has no pull request; open one with ${forge} pr create, or resolve the frontier from a branch whose chain is fully submitted`
     );
   }
-  if (rows.length > 1) {
+  if (candidates.length > 1) {
     throw new UserError(
-      `branch ${branch} has multiple pull requests (${rows.map((item) => `#${item.pr}`).join(", ")}); close the stale ones first`
+      `branch ${branch} has multiple pull requests (${candidates.map((item) => `#${item.pr}`).join(", ")}); close the stale ones first`
     );
   }
   return row;
@@ -1181,8 +1186,35 @@ function trunkBranch(repo: string): string {
   }
 }
 
-function resolveFrontier(repo: string, forge: Forge): readonly FrontierPr[] {
-  const trunk = trunkBranch(repo);
+function explicitBaseBranch(repo: string, branch: string): string {
+  if (
+    branch.trim().length === 0 ||
+    branch.startsWith("-") ||
+    branch.startsWith("refs/") ||
+    branch.includes("@{") ||
+    /^(?:@|HEAD|[A-Z_]+_HEAD|AUTO_MERGE)$/.test(branch)
+  ) {
+    throw new UserError(`invalid base branch: ${branch}`);
+  }
+  if (runGit({ args: ["check-ref-format", "--branch", branch], repo }) !== branch) {
+    throw new UserError(`invalid base branch: ${branch}`);
+  }
+  for (const ref of [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]) {
+    try {
+      runGit({ args: ["show-ref", "--verify", "--quiet", ref], repo });
+      return branch;
+    } catch {
+      // The branch may exist only on origin.
+    }
+  }
+  throw new UserError(`base branch ${branch} does not exist locally or on origin`);
+}
+
+function resolveFrontier(
+  repo: string,
+  forge: Forge,
+  trunk: string
+): readonly FrontierPr[] {
   const current = currentBranch(repo);
   if (current === trunk) {
     return [];
@@ -1562,7 +1594,11 @@ export function openStore(
           throw new UserError("--prs must not contain duplicates");
         }
         const old = await readFrontier(store);
-        const prs = resolveFrontier(repo, forge);
+        const base =
+          params.baseBranch === undefined
+            ? trunkBranch(repo)
+            : explicitBaseBranch(repo, params.baseBranch);
+        const prs = resolveFrontier(repo, forge, base);
         if (pin !== undefined) {
           validateFrontierPin({
             actual: prs.map((row) => row.pr),
