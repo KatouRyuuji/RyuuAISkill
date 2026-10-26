@@ -932,13 +932,17 @@ function desiredText(operation) {
   return null;
 }
 
-function briefDiff(oldText, newText, maxLines) {
-  if (oldText === newText) return "(content unchanged)";
+function stripFrontmatter(text) {
+  if (text == null) return null;
+  const value = String(text);
+  if (value.startsWith(CURSOR_FRONTMATTER)) return value.slice(CURSOR_FRONTMATTER.length);
+  return value;
+}
+
+function lineChanges(oldText, newText) {
   const oldLines = oldText == null ? [] : String(oldText).split("\n");
   const newLines = newText == null ? [] : String(newText).split("\n");
-  if (oldLines.length * newLines.length > 250_000) {
-    return `(too large for line diff: ${oldLines.length} → ${newLines.length} lines)`;
-  }
+  if (oldLines.length * newLines.length > 250_000) return { added: [], removed: [], tooBig: true };
   const rows = oldLines.length + 1;
   const cols = newLines.length + 1;
   const dp = Array.from({ length: rows }, () => new Int32Array(cols));
@@ -949,54 +953,43 @@ function briefDiff(oldText, newText, maxLines) {
         : Math.max(dp[i + 1][j], dp[i][j + 1]);
     }
   }
-  const out = [];
+  const added = [];
+  const removed = [];
   let i = 0;
   let j = 0;
-  let equalRun = 0;
-  const flushEqual = () => {
-    if (equalRun > 0) {
-      out.push(`@@ unchanged ${equalRun} line${equalRun === 1 ? "" : "s"} @@`);
-      equalRun = 0;
-    }
-  };
   while (i < oldLines.length && j < newLines.length) {
     if (oldLines[i] === newLines[j]) {
-      equalRun += 1;
       i += 1;
       j += 1;
       continue;
     }
-    flushEqual();
     if (dp[i + 1][j] >= dp[i][j + 1]) {
-      out.push(`-${oldLines[i]}`);
+      removed.push(oldLines[i]);
       i += 1;
     } else {
-      out.push(`+${newLines[j]}`);
+      added.push(newLines[j]);
       j += 1;
     }
-    if (out.length >= maxLines) {
-      out.push("... (truncated)");
-      return out.join("\n");
-    }
   }
-  flushEqual();
   while (i < oldLines.length) {
-    out.push(`-${oldLines[i]}`);
+    removed.push(oldLines[i]);
     i += 1;
-    if (out.length >= maxLines) {
-      out.push("... (truncated)");
-      return out.join("\n");
-    }
   }
   while (j < newLines.length) {
-    out.push(`+${newLines[j]}`);
+    added.push(newLines[j]);
     j += 1;
-    if (out.length >= maxLines) {
-      out.push("... (truncated)");
-      return out.join("\n");
-    }
   }
-  return out.join("\n") || "(content unchanged)";
+  const visible = (line) => line.trim() !== "";
+  return { added: added.filter(visible), removed: removed.filter(visible), tooBig: false };
+}
+
+function displayName(agentId) {
+  return {
+    "claude-code": "Claude",
+    codex: "Codex",
+    cursor: "Cursor",
+    opencode: "OpenCode",
+  }[agentId] ?? agentId;
 }
 
 function changedOperations(operations) {
@@ -1012,28 +1005,6 @@ function shortenPath(path, root) {
   return slash(path);
 }
 
-function derivedLabel(operation, plan, branch, templateContent) {
-  if (operation.kind !== "file") return null;
-  const text = operation.content.toString("utf8");
-  if (text === templateContent) return "正本原文";
-  if (text === `${CURSOR_FRONTMATTER}${templateContent}`) return "正本原文加 alwaysApply 头";
-  const increment = plan.branches[branch][operation.agent];
-  if (increment && text === compose(templateContent, increment)) return "正本原文加本分支增量";
-  return null;
-}
-
-function actionLabel(action) {
-  return { update: "更新", create: "新建", delete: "删除" }[action] ?? action;
-}
-
-function agentLabel(operation) {
-  return operation.agent ?? "共享";
-}
-
-function tableCell(text) {
-  return String(text).replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ");
-}
-
 function operationSignature(operation) {
   return [
     operation.role,
@@ -1041,38 +1012,8 @@ function operationSignature(operation) {
     operation.action,
     operation.kind,
     operation.desiredSha256 ?? "",
+    operation.targetPath ?? "",
   ].join("|");
-}
-
-function renderOperation(operation, plan, branch, templateContent, root) {
-  const path = shortenPath(operation.path, root);
-  if (operation.action === "conflict") {
-    return `- 冲突 \`${path}\` — 扫描后该文件已变，需要重新 scan`;
-  }
-  if (operation.kind === "link") {
-    return `- ${actionLabel(operation.action)} \`${path}\`（链接到 \`${shortenPath(operation.targetPath, root)}\`）${operation.reason ? ` — ${operation.reason}` : ""}`;
-  }
-  if (operation.kind === "check") return `- 保持原配置 \`${path}\``;
-  const label = derivedLabel(operation, plan, branch, templateContent);
-  if (label && operation.role !== "canonical") return `- ${actionLabel(operation.action)} \`${path}\` — ${label}`;
-  const diff = briefDiff(currentText(operation), desiredText(operation), 40);
-  return `- ${actionLabel(operation.action)} \`${path}\`
-
-\`\`\`diff
-${diff}
-\`\`\``;
-}
-
-function renderGrouped(operations, plan, branch, templateContent, root) {
-  const lines = [];
-  for (const agentId of [...new Set(operations.map(agentLabel))]) {
-    lines.push(`### ${agentId}`, "");
-    for (const operation of operations.filter((item) => agentLabel(item) === agentId)) {
-      lines.push(renderOperation(operation, plan, branch, templateContent, root));
-    }
-    lines.push("");
-  }
-  return lines;
 }
 
 function groupBranches(branchOperations) {
@@ -1095,89 +1036,160 @@ function sharedSignatures(branchOperations) {
   return new Set([...sets[0]].filter((signature) => sets.every((set) => set.has(signature))));
 }
 
-function branchAgentState(plan, operations, branch, agentId) {
-  const own = operations.filter((operation) => operation.agent === agentId);
-  if (own.some((operation) => operation.action === "conflict")) return "冲突";
-  const increment = plan.branches[branch][agentId];
-  const count = ruleLines(increment).length;
-  if (count) return `正本 + ${count} 条`;
-  if (increment.trim()) return "正本 + 增量";
-  return own.length ? "正本原文" : "不变";
+function plainLine(line) {
+  return String(line).trim().replace(/^[-*]\s+/, "");
 }
 
-function renderAnalysis(plan) {
-  const lines = ["## 分析", ""];
-  for (const item of plan.analysis) {
-    lines.push(`### ${item.agent}`, "");
-    lines.push(`理由：${item.rationale}`, "");
-    if (!item.keep.length && !item.drop.length) continue;
-    lines.push("| 判定 | 规则原文 |");
-    lines.push("|---|---|");
-    for (const rule of item.keep) lines.push(`| 保留 | ${tableCell(rule)} |`);
-    for (const rule of item.drop) lines.push(`| 丢弃 | ${tableCell(rule)} |`);
-    lines.push("");
+function tableCell(text) {
+  return String(text).replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ").trim();
+}
+
+function markdownTable(headers, rows) {
+  const active = headers.filter((header) => rows.some((row) => row[header.key] !== ""));
+  if (!active.length || !rows.length) return [];
+  const head = `| ${active.map((header) => header.label).join(" | ")} |`;
+  const rule = `| ${active.map(() => "---").join(" | ")} |`;
+  const body = rows.map((row) => `| ${active.map((header) => tableCell(row[header.key])).join(" | ")} |`);
+  return [head, rule, ...body];
+}
+
+function branchLabel(branches) {
+  const ordered = BRANCHES.filter((branch) => branches.includes(branch));
+  if (ordered.length === 0) return "不保留";
+  return ordered.join("、");
+}
+
+function hideUniformOption(rows) {
+  const full = BRANCHES.join("、");
+  if (rows.length && rows.every((row) => row.option === full)) {
+    return rows.map((row) => ({ ...row, option: "" }));
   }
-  return lines;
+  return rows;
+}
+
+function fillBlankWho(rows) {
+  if (!rows.some((row) => row.who !== "")) return rows;
+  return rows.map((row) => ({ ...row, who: row.who || "正本" }));
+}
+
+function canonicalOperation(operations) {
+  const files = operations.filter((operation) => operation.kind === "file" && operation.action !== "unchanged");
+  for (const role of ["canonical", "opencodeCanonical", "cursorCanonical"]) {
+    const found = files.find((operation) => operation.role === role);
+    if (found) return found;
+  }
+  return null;
+}
+
+function textRowsFromOperation(operation, branches) {
+  if (!operation || operation.action === "conflict") return [];
+  const oldBody = stripFrontmatter(currentText(operation));
+  const newBody = stripFrontmatter(desiredText(operation));
+  if (oldBody == null || oldBody === "") {
+    return [{ option: branchLabel(branches), who: "", change: "+", content: "新建，正文不在这里展开" }];
+  }
+  if (oldBody === newBody) return [];
+  const { added, removed, tooBig } = lineChanges(oldBody, newBody);
+  if (tooBig || added.length + removed.length > 12) {
+    return [{ option: branchLabel(branches), who: "", change: "+", content: "改动较多，不逐句展开" }];
+  }
+  const row = (change, line) => ({
+    option: branchLabel(branches),
+    who: "",
+    change,
+    content: plainLine(line),
+  });
+  return [
+    ...added.map((line) => row("+", line)),
+    ...removed.map((line) => row("-", line)),
+  ];
+}
+
+function contentRows(plan, branchOperations, shared) {
+  const rows = [];
+  const sharedOperations = changedOperations(branchOperations.A)
+    .filter((operation) => shared.has(operationSignature(operation)));
+  const sharedCanonical = canonicalOperation(sharedOperations);
+  if (sharedCanonical) rows.push(...textRowsFromOperation(sharedCanonical, [...BRANCHES]));
+  else {
+    for (const branch of BRANCHES) {
+      const own = changedOperations(branchOperations[branch])
+        .filter((operation) => !shared.has(operationSignature(operation)));
+      rows.push(...textRowsFromOperation(canonicalOperation(own), [branch]));
+    }
+  }
+  for (const item of plan.analysis) {
+    const who = displayName(item.agent);
+    const keptByC = ruleLines(plan.branches.C[item.agent]);
+    const keptByB = ruleLines(plan.branches.B[item.agent]);
+    const extraInB = keptByB.filter((line) => !keptByC.some((other) => sameRule(other, line)));
+    const dropped = item.drop.filter((rule) => !keptByB.some((line) => sameRule(line, rule)));
+    for (const line of keptByC) {
+      rows.push({ option: branchLabel(["B", "C"]), who, change: "+", content: plainLine(line) });
+    }
+    for (const line of extraInB) {
+      rows.push({ option: branchLabel(["B"]), who, change: "+", content: plainLine(line) });
+    }
+    for (const rule of dropped) {
+      rows.push({ option: "", who, change: "-", content: plainLine(rule) });
+    }
+  }
+  return rows;
+}
+
+function fileRows(branchOperations, root) {
+  const byKey = new Map();
+  for (const branch of BRANCHES) {
+    for (const operation of changedOperations(branchOperations[branch])) {
+      if (operation.action !== "delete" && operation.action !== "conflict") continue;
+      const path = shortenPath(operation.path, root);
+      const change = operation.action === "delete" ? "-" : "冲突";
+      const key = `${change}\0${path}`;
+      const entry = byKey.get(key) ?? { branches: [], change, path };
+      if (!entry.branches.includes(branch)) entry.branches.push(branch);
+      byKey.set(key, entry);
+    }
+  }
+  return [...byKey.values()].map((entry) => ({
+    option: branchLabel(entry.branches),
+    change: entry.change,
+    file: entry.path,
+  }));
 }
 
 function renderReport(plan, inventory, branchOperations, valid) {
-  const templateContent = inventory.template.content;
   const root = plan.root;
   const groups = groupBranches(branchOperations);
   const shared = sharedSignatures(branchOperations);
-  const recommendedGroup = groups.find((group) => group.branches.includes(plan.recommendation));
-  const agentIds = inventory.agents.map((agent) => agent.id);
-  const lines = [
-    "# agent-prompt-sync dry-run",
-    "",
-    `推荐分支：${recommendedGroup.branches.join("、")}`,
-    `分支状态：${valid ? "可以 apply" : "不能 apply，扫描后文件已变，需要重新 scan 并生成新计划"}`,
-    "",
-  ];
-  if (inventory.excludedAgents.length) {
-    lines.push("## 已排除");
-    for (const item of inventory.excludedAgents) lines.push(`- ${item.id}：${item.reason}`);
-    lines.push("");
-  }
-  if (groups.length < BRANCHES.length) {
-    const merged = groups.filter((group) => group.branches.length > 1);
-    lines.push("## 注意");
-    lines.push("");
-    for (const group of merged) {
-      lines.push(`${group.branches.join("、")} 的改动完全相同，实际只有 ${groups.length} 个选项。`);
-    }
-    lines.push("");
-  }
+  const apply = valid
+    ? "可以 apply。"
+    : "不能 apply。扫描后文件已变，需要重新 scan 并生成新计划。";
+  const choice = groups.length === 1
+    ? `${groups[0].branches.join("、")} 相同。`
+    : `推荐 ${plan.recommendation}。`;
+  const lines = [`${apply}${choice}`];
+  for (const item of inventory.excludedAgents) lines.push(`已排除 ${item.id}：${item.reason}`);
 
-  lines.push("## 选项对比", "");
-  lines.push(`| 选项 | ${agentIds.join(" | ")} |`);
-  lines.push(`|---|${agentIds.map(() => "---").join("|")}|`);
-  for (const group of groups) {
-    const branch = group.branches[0];
-    const title = group.branches.includes(plan.recommendation) ? "（推荐）" : "";
-    const cells = agentIds.map((id) => branchAgentState(plan, group.operations, branch, id));
-    lines.push(`| ${group.branches.join("、")}${title} | ${cells.join(" | ")} |`);
-  }
-  lines.push("");
-
-  const sharedOperations = changedOperations(branchOperations.A).filter((operation) => shared.has(operationSignature(operation)));
-  if (sharedOperations.length) {
-    lines.push(`## 不受选择影响 · ${sharedOperations.length} 处`);
-    lines.push("");
-    lines.push(...renderGrouped(sharedOperations, plan, "A", templateContent, root));
-  }
-
-  for (const group of groups) {
-    const branch = group.branches[0];
-    const title = group.branches.includes(plan.recommendation) ? "（推荐）" : "";
-    const own = group.operations.filter((operation) => !shared.has(operationSignature(operation)));
-    if (!own.length) continue;
-    lines.push(`## 选项 ${group.branches.join("、")}${title} · 另有 ${own.length} 处改动`);
-    lines.push("");
-    lines.push(...renderGrouped(own, plan, branch, templateContent, root));
-  }
-
-  lines.push(...renderAnalysis(plan));
+  const content = markdownTable(
+    [
+      { key: "option", label: "选项" },
+      { key: "who", label: "谁" },
+      { key: "change", label: "变化" },
+      { key: "content", label: "内容" },
+    ],
+    fillBlankWho(hideUniformOption(contentRows(plan, branchOperations, shared))),
+  );
+  const files = markdownTable(
+    [
+      { key: "option", label: "选项" },
+      { key: "change", label: "变化" },
+      { key: "file", label: "文件" },
+    ],
+    hideUniformOption(fileRows(branchOperations, root)),
+  );
+  if (content.length) lines.push("", ...content);
+  if (files.length) lines.push("", ...files);
+  if (!content.length && !files.length) lines.push("", "没有要写入的文件。");
   return `${lines.join("\n").trim()}\n`;
 }
 
