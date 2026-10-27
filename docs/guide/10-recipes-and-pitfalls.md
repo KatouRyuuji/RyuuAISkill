@@ -18,7 +18,7 @@ Mechanics first, history second. Each skill's report tells you which sources it 
 /poteto-mode read this thread. restate the underlying issue in your own words, in plain english. don't change any code yet.
 ```
 
-A misreading shows up in the restatement, where it costs one message to correct. Keep your own theory to yourself until the agent has stated its own. `/in-your-own-words` asks for the restatement alone, with no playbook.
+A misreading shows up in the restatement, where it costs one message to correct. Keep your own theory to yourself until the agent has stated its own. `/restate` asks for the restatement alone, with no playbook.
 
 ## Sharpen a prompt before you send it
 

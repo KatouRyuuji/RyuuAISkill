@@ -21,6 +21,7 @@ Claude Code 是首要目标平台；仓库同时保留 pstack 对其他 harness 
 | [`/poteto-mode`](./skills/poteto-mode/SKILL.md) | 原有的完整工程编排入口，可独立使用 |
 | [`/storage-audit`](./skills/storage-audit/SKILL.md) | 只读分析目录冗余、缓存、压缩包副本和存储空间 |
 | [`/agent-prompt-sync`](./skills/agent-prompt-sync/SKILL.md) | 维护唯一 用户级提示词 正本，以链接和平台增量同步实际 agent 的用户级提示词 |
+| [`/restate`](./skills/restate/SKILL.md) | 显式用白话复述诉求或意图，等待确认或纠正后再继续 |
 | [Scoped MCP 约定](./skills/ryuuji-ai-skill/references/scoped-mcp.md) | 使用项目子代理的 inline `mcpServers`，在任务期间连接 MCP |
 | [独立 MCP 会话](./skills/ryuuji-ai-skill/references/independent-mcp.md) | 使用独立 `claude -p` 进程和显式 MCP 配置执行一次性任务 |
 | [`tests/scoped-mcp`](./tests/scoped-mcp/) | 验证两种隔离方式的 MCP 生命周期、权限和清理 |
@@ -36,7 +37,7 @@ Claude Code 是首要目标平台；仓库同时保留 pstack 对其他 harness 
 npx skills add KatouRyuuji/RyuuAISkill
 ```
 
-安装器会列出可选择的 skills。使用完整 RyuuAI 路由时，选择 `ryuuji-ai-skill`、`poteto-mode`、`storage-audit`、`agent-prompt-sync` 及其依赖；只需要某个独立 skill 时，可以只安装它和所需依赖。
+安装器会列出可选择的 skills。使用完整 RyuuAI 路由时，选择 `ryuuji-ai-skill`、`poteto-mode`、`storage-audit`、`agent-prompt-sync`、`restate` 及其依赖；只需要某个独立 skill 时，可以只安装它和所需依赖。
 
 ## 使用
 
@@ -50,6 +51,7 @@ RyuuAI 目前这样路由：
 
 - 存储分析 → `storage-audit`。
 - 用户级提示词分析、精简或同步 → `agent-prompt-sync`。
+- 显式要求先复述并确认诉求 → `restate`。
 - 需要任务级 MCP → 对应的预注册项目 agent 或独立 `claude -p` 进程。
 - 其他请求 → 只进入一次 `poteto-mode`。
 
@@ -123,6 +125,7 @@ RyuuAISkill 是独立的公开仓库，不设置指向原 fork 的上游同步�
 skills/
   ryuuji-ai-skill/     # 统一入口和 scoped MCP 约定
   agent-prompt-sync/   # 唯一正本、链接、平台增量与安全应用
+  restate/             # 显式复述诉求并等待确认
   storage-audit/       # 只读存储审计扩展
   poteto-mode/         # poteto 编排、playbooks 和状态脚本
   principle-*/         # poteto 原则叶子 skills
