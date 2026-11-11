@@ -1,6 +1,6 @@
 ---
 name: ryuuji-ai-skill
-description: RyuuAI's explicit entry for poteto-mode workflows, project-scoped MCP tasks, storage audits, agent prompt migrations, and explicit intent restatement. Use for /ryuuji-ai-skill or requests to enter RyuuAI.
+description: RyuuAI's explicit entry for poteto-mode workflows, project-scoped MCP tasks, storage audits, agent prompt migrations, and task sharpening. Use for /ryuuji-ai-skill or requests to enter RyuuAI.
 disable-model-invocation: true
 ---
 
@@ -14,7 +14,7 @@ Handle a request that clearly matches one of these extensions by reading the ref
 
 - **Storage audit.** Directory redundancy, reclaimable space, archive copies, or storage cleanup analysis. Read `../storage-audit/SKILL.md`.
 - **Agent prompt sync.** User-level prompt analysis, expected-content review, and writing standalone agent prompt files. Read `../agent-prompt-sync/SKILL.md`.
-- **Restate.** Explicitly restate the user's request in plain language, consider what they may want and how to describe it more accurately, then confirm with them. Read `../restate/SKILL.md`.
+- **Sharpen.** Clarify the user's goal, deepen the task without expanding its scope, and rewrite the prompt without executing it. Read `../sharpen/SKILL.md`.
 - **Project-scoped MCP.** A task needs an MCP server only for delegated work. For a subagent in the current session, read `references/scoped-mcp.md` and select the matching pre-registered project agent. For a separate `claude -p` process, read `references/independent-mcp.md`. Choose one isolation mode and run the task outside the parent chat.
 
 For a mixed request, split it into explicit tasks and route each task once.
