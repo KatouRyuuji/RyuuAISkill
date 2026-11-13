@@ -64,20 +64,33 @@ const ready = {
 
 void ready;
 
-// PR 179929's shape. Each assertion below stays a single short statement so a
-// reformat cannot drift the directive away from the line that actually errors.
-const refused = {
+const blocked = {
+  kind: "allowed",
+  basis: "merge-state",
+  mergeStateStatus: "BLOCKED",
+  headRollupState: "SUCCESS",
+} as const;
+
+// @ts-expect-error Branch protection cannot be bypassed by a passing rollup.
+const blockedIsNotAllowed: GitHubMergeAllowed = blocked;
+
+// @ts-expect-error CI cannot be clean while GitHub refuses the merge.
+const refusalIsNotClean: CiClean = { ...cleanCi, github: blocked };
+
+const blockedPending = {
   kind: "allowed",
   basis: "rollup",
   mergeStateStatus: "BLOCKED",
-  headRollupState: "FAILURE",
-} as const;
+  headRollupState: "PENDING",
+} as const satisfies GitHubMergeAllowed;
 
-// @ts-expect-error BLOCKED with a failing rollup is a refusal, not an allowance.
-const refusalIsNotAllowed: GitHubMergeAllowed = refused;
+// @ts-expect-error A rollup-only pending allowance cannot prove clean CI.
+const pendingIsNotClean: CiClean = { ...cleanCi, github: blockedPending };
 
-// @ts-expect-error CI cannot be clean while GitHub refuses the merge.
-const refusalIsNotClean: CiClean = { ...cleanCi, github: refused };
+const behind = { ...blocked, mergeStateStatus: "BEHIND" } as const;
+
+// @ts-expect-error An out-of-date protected branch is not an allowed merge.
+const behindIsNotAllowed: GitHubMergeAllowed = behind;
 
 // @ts-expect-error READY cannot carry the failing-checks exit code.
 const readyWithBlockerExit: ReadyVerdict = { ...ready, exitCode: 4 };
@@ -87,7 +100,21 @@ const unprovenPr = { kind: "ready-pr", context } as const;
 // @ts-expect-error An open READY row must carry positive readiness proof.
 const readyWithoutProof: ReadyPr = unprovenPr;
 
-void refusalIsNotAllowed;
+const reviewRequiredPr = {
+  ...readyPr,
+  proof: {
+    ...readyPr.proof,
+    gate: { ...readyPr.proof.gate, reviewDecision: "REVIEW_REQUIRED" },
+  },
+} as const;
+
+// @ts-expect-error A required review cannot be readiness proof.
+const reviewRequiredReady: ReadyPr = reviewRequiredPr;
+
+void blockedIsNotAllowed;
 void refusalIsNotClean;
+void pendingIsNotClean;
+void behindIsNotAllowed;
 void readyWithBlockerExit;
 void readyWithoutProof;
+void reviewRequiredReady;

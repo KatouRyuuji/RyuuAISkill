@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import {
   ChecksUnavailable,
   WatcherQueryError,
@@ -440,6 +440,25 @@ describe("context and stack discovery", () => {
     ]);
     expect(ordered.map((item) => Number(item.number))).toEqual([41, 42, 43]);
   });
+
+  it("rejects a base/head cycle instead of walking it forever", () => {
+    expect(() =>
+      orderStack(context, [
+        {
+          number: context.number,
+          headRefName: "a",
+          isCrossRepository: false,
+          baseRefName: "b",
+        },
+        {
+          number: parsePrNumber(41),
+          headRefName: "b",
+          isCrossRepository: false,
+          baseRefName: "a",
+        },
+      ])
+    ).toThrow("base/head cycle detected at PR #42");
+  });
   it("does not use a fork's same-named head as a stack parent", () => {
     const ordered = orderStack(context, [
       { number: parsePrNumber(41), headRefName: "base-feature", baseRefName: "main", isCrossRepository: true },
@@ -472,18 +491,32 @@ describe("context and stack discovery", () => {
   it("requests and parses fork identity from gh before stack discovery", () => {
     const directory = mkdtempSync(join(tmpdir(), "watch-pr-fork-"));
     try {
-      writeFileSync(join(directory, "gh"), `#!/bin/sh
+      const executable = join(
+        directory,
+        process.platform === "win32" ? "gh.cmd" : "gh"
+      );
+      const script = process.platform === "win32"
+        ? [
+            "@echo off",
+            'set "args=%*"',
+            'set "matched=%args:number,headRefName,baseRefName,isCrossRepository=%"',
+            'if "%matched%"=="%args%" exit /b 2',
+            'echo [{"number":42,"headRefName":"feature","baseRefName":"main","isCrossRepository":true}]',
+            "",
+          ].join("\r\n")
+        : `#!/bin/sh
 case "$*" in
   *number,headRefName,baseRefName,isCrossRepository*) ;;
   *) exit 2 ;;
 esac
 printf '%s\\n' '[{"number":42,"headRefName":"feature","baseRefName":"main","isCrossRepository":true}]'
-`, { mode: 0o755 });
+`;
+      writeFileSync(executable, script, { mode: 0o755 });
       const program = `import { GhGitHubReader } from ${JSON.stringify(import.meta.dir + "/github.ts")};
         console.log(JSON.stringify(await new GhGitHubReader().openPullRequests({ owner: "owner", repo: "repo" })));`;
       const child = spawnSync(process.execPath, ["-e", program], {
         encoding: "utf8", timeout: 2000,
-        env: { ...process.env, PATH: directory + ":" + process.env.PATH },
+        env: { ...process.env, PATH: directory + delimiter + process.env.PATH },
       });
       expect(child.error).toBeUndefined();
       expect(child.status).toBe(0);

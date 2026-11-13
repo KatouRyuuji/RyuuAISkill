@@ -9,20 +9,27 @@ export function assessGitHubMerge(args: {
   readonly mergeStateStatus: T.MergeStateStatus;
   readonly headRollupState: T.RollupState;
 }): T.GitHubMergeAssessment {
-  if (args.mergeStateStatus === "BLOCKED") {
-    if (args.headRollupState === "ERROR" || args.headRollupState === "FAILURE")
-      return {
-        kind: "refused",
-        mergeStateStatus: args.mergeStateStatus,
-        headRollupState: args.headRollupState,
-      };
+  if (
+    args.mergeStateStatus === "BLOCKED" &&
+    (args.headRollupState === "PENDING" ||
+      args.headRollupState === "EXPECTED")
+  )
     return {
       kind: "allowed",
       basis: "rollup",
       mergeStateStatus: args.mergeStateStatus,
       headRollupState: args.headRollupState,
     };
-  }
+  if (
+    args.mergeStateStatus === "BLOCKED" ||
+    args.mergeStateStatus === "BEHIND" ||
+    args.mergeStateStatus === "UNKNOWN"
+  )
+    return {
+      kind: "refused",
+      mergeStateStatus: args.mergeStateStatus,
+      headRollupState: args.headRollupState,
+    };
   return {
     kind: "allowed",
     basis: "merge-state",
@@ -32,9 +39,10 @@ export function assessGitHubMerge(args: {
 }
 async function mergeAssessment(
   reader: T.GitHubReader,
-  facts: T.PullRequestFacts
+  facts: T.PullRequestFacts,
+  signal?: AbortSignal
 ) {
-  const commits = await reader.commitRollups(facts.context);
+  const commits = await reader.commitRollups(facts.context, signal);
   const headRollupState =
     facts.headRefOid === null
       ? null
@@ -61,14 +69,15 @@ export async function readSnapshot(args: {
   readonly context: T.PrContext;
   readonly pendingHistory: "include" | "omit";
   readonly allowDraft: boolean;
+  readonly signal?: AbortSignal;
 }): Promise<T.PrSnapshot> {
-  const facts = await args.reader.pullRequest(args.context);
+  const facts = await args.reader.pullRequest(args.context, args.signal);
   if (facts.state === "MERGED" || facts.mergedAt !== null)
     return { kind: "merged", context: args.context, facts };
   if (facts.state === "CLOSED")
     return { kind: "closed", context: args.context, facts };
-  const threads = await resolveReviewThreads(args.reader, args.context);
-  const checks = await resolveChecks(args.reader, args.context);
+  const threads = await resolveReviewThreads(args.reader, args.context, args.signal);
+  const checks = await resolveChecks(args.reader, args.context, args.signal);
   const failed = nonEmpty(
     checks.checks.filter(
       (check): check is T.FailedCheck => check.kind === "failed"
@@ -90,7 +99,7 @@ export async function readSnapshot(args: {
       hadPreviousPassingCi: false,
     };
   else {
-    const merge = await mergeAssessment(args.reader, facts);
+    const merge = await mergeAssessment(args.reader, facts, args.signal);
     const base = {
       source: checks.source,
       all: checks.checks,
@@ -104,16 +113,26 @@ export async function readSnapshot(args: {
         pending: pending ?? [],
         github: merge.github,
       };
-    else if (merge.github.kind === "refused")
+    else if (pending !== null && merge.github.kind === "allowed")
+      ci = { ...base, kind: "ci-pending", failed: [], pending };
+    else if (
+      merge.github.kind === "refused" ||
+      merge.github.basis === "rollup"
+    )
       ci = {
         ...base,
         kind: "ci-github-rejected",
         failed: [],
         pending: pending ?? [],
-        github: merge.github,
+        github:
+          merge.github.kind === "refused"
+            ? merge.github
+            : {
+                kind: "refused",
+                mergeStateStatus: merge.github.mergeStateStatus,
+                headRollupState: merge.github.headRollupState,
+              },
       };
-    else if (pending !== null)
-      ci = { ...base, kind: "ci-pending", failed: [], pending };
     else
       ci = {
         ...base,
@@ -164,8 +183,10 @@ function gateReason(
   if (row.kind === "merged") return null;
   if (row.kind === "closed") return "closed-without-merge";
   if (row.facts.isDraft && !allowDraft) return "draft-pr";
-  return row.facts.reviewDecision === "CHANGES_REQUESTED"
-    ? "changes-requested"
+  if (row.facts.reviewDecision === "CHANGES_REQUESTED")
+    return "changes-requested";
+  return row.facts.reviewDecision === "REVIEW_REQUIRED"
+    ? "review-required"
     : null;
 }
 function gateBlocker(
@@ -199,7 +220,7 @@ function readyContribution(
   )
     return null;
   const reviewDecision = row.facts.reviewDecision;
-  if (reviewDecision === "CHANGES_REQUESTED") return null;
+  if (reviewDecision !== "APPROVED" && reviewDecision !== null) return null;
   return {
     kind: "ready-pr",
     context: row.context,
@@ -327,6 +348,16 @@ function blockerVerdict(
     }
   }
 }
+export function deadlineTimeoutVerdict(
+  stamp: VerdictStamp
+): T.TimeoutVerdict {
+  return stamp({
+    kind: "TIMEOUT",
+    terminal: true,
+    exitCode: 5,
+    reason: { kind: "deadline-exceeded" },
+  });
+}
 export function statusQueryVerdict(
   stamp: VerdictStamp,
   failures: number,
@@ -348,6 +379,26 @@ export interface RunDependencies {
   readonly reader: T.GitHubReader;
   readonly clock: WatchClock;
   readonly emit: (verdict: T.ProgressVerdict) => void;
+  readonly signal?: AbortSignal;
+  readonly startedAt?: number;
+}
+class DeadlineExceeded extends Error {}
+export async function raceDeadline<V>(
+  operation: () => Promise<V>,
+  signal?: AbortSignal
+): Promise<V> {
+  if (signal?.aborted) throw new DeadlineExceeded();
+  if (signal === undefined) return operation();
+  let onAbort: () => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(new DeadlineExceeded());
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([operation(), aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort!);
+  }
 }
 const deadlinePassed = (
   started: number,
@@ -369,7 +420,13 @@ async function pollUntilTerminal<V>(args: {
   readonly step: () => Promise<StepResult<V>>;
 }): Promise<V | T.BlockerVerdict | T.TimeoutVerdict> {
   let failures = 0;
-  const started = args.dependencies.clock.now();
+  const started = args.dependencies.startedAt ?? args.dependencies.clock.now();
+  const aborted = (): boolean =>
+    args.dependencies.signal?.aborted === true;
+  const expired = (): boolean =>
+    aborted() || deadlinePassed(started, args.options, args.dependencies.clock.now());
+  const isDeadlineError = (error: unknown): boolean =>
+    error instanceof DeadlineExceeded || aborted();
   const sleep = async (seconds: number): Promise<void> => {
     const remaining = args.options.timeout > 0
       ? Math.max(0, args.options.timeout - (args.dependencies.clock.now() - started))
@@ -377,11 +434,14 @@ async function pollUntilTerminal<V>(args: {
     await args.dependencies.clock.sleep(Math.min(seconds, remaining));
   };
   while (true) {
+    if (expired()) return deadlineTimeoutVerdict(args.stamp);
     let result: StepResult<V>;
     try {
-      result = await args.step();
+      result = await raceDeadline(args.step, args.dependencies.signal);
+      if (expired()) return deadlineTimeoutVerdict(args.stamp);
       failures = 0;
     } catch (error) {
+      if (isDeadlineError(error)) return deadlineTimeoutVerdict(args.stamp);
       if (!(error instanceof WatcherQueryError)) throw error;
       failures += 1;
       if (!error.failure.retryable || failures >= args.options.maxQueryErrors)
@@ -399,24 +459,39 @@ async function pollUntilTerminal<V>(args: {
           retryInSeconds,
         })
       );
-      if (deadlinePassed(started, args.options, args.dependencies.clock.now()))
+      if (expired())
         return args.stamp({
           kind: "TIMEOUT",
           terminal: true,
           exitCode: 5,
           reason: { kind: "status-unavailable", failure: error.failure },
         });
-      await sleep(retryInSeconds);
+      try {
+        await raceDeadline(
+          () => sleep(retryInSeconds),
+          args.dependencies.signal
+        );
+      } catch (sleepError) {
+        if (isDeadlineError(sleepError))
+          return deadlineTimeoutVerdict(args.stamp);
+        throw sleepError;
+      }
       continue;
     }
     if (result.kind === "terminal") return result.verdict;
     if (result.kind === "sleep") {
-      if (
-        result.onDeadline !== undefined &&
-        deadlinePassed(started, args.options, args.dependencies.clock.now())
-      )
-        return result.onDeadline();
-      await sleep(result.seconds);
+      if (expired())
+        return result.onDeadline?.() ?? deadlineTimeoutVerdict(args.stamp);
+      try {
+        await raceDeadline(
+          () => sleep(result.seconds),
+          args.dependencies.signal
+        );
+      } catch (sleepError) {
+        if (isDeadlineError(sleepError))
+          return deadlineTimeoutVerdict(args.stamp);
+        throw sleepError;
+      }
     }
   }
 }
@@ -428,17 +503,29 @@ export async function runSimple(args: {
   readonly options: T.PollingOptions;
 }): Promise<T.TerminalVerdict> {
   const stamp = verdictFactory(args.dependencies.clock, args.mode);
+  const started = args.dependencies.startedAt ?? args.dependencies.clock.now();
+  const throwIfExpired = (): void => {
+    if (
+      args.dependencies.signal?.aborted ||
+      deadlinePassed(started, args.options, args.dependencies.clock.now())
+    )
+      throw new DeadlineExceeded();
+  };
   const step = async (): Promise<StepResult<T.TerminalVerdict>> => {
     const rows: T.PrSnapshot[] = [];
-    for (const context of args.contexts)
+    for (const context of args.contexts) {
+      throwIfExpired();
       rows.push(
         await readSnapshot({
           reader: args.dependencies.reader,
           context,
           pendingHistory: "include",
           allowDraft: args.options.allowDraft,
+          signal: args.dependencies.signal,
         })
       );
+      throwIfExpired();
+    }
     const complete = nonEmpty(rows);
     if (complete === null) throw new Error("watch context cannot be empty");
     if (args.statusOnly)
@@ -715,7 +802,10 @@ export async function runQueued(args: {
   readonly contexts: T.NonEmpty<T.PrContext>;
   readonly options: T.PollingOptions;
 }): Promise<T.QueueTerminalVerdict> {
-  let state = createQueueState(args.contexts, args.dependencies.clock.now());
+  let state = createQueueState(
+    args.contexts,
+    args.dependencies.startedAt ?? args.dependencies.clock.now()
+  );
   const stamp = verdictFactory(args.dependencies.clock, "queued-stack");
   args.dependencies.emit(
     stamp({ kind: "QUEUE", terminal: false, queue: args.contexts })
@@ -750,6 +840,7 @@ export async function runQueued(args: {
       context,
       pendingHistory: "omit",
       allowDraft: args.options.allowDraft,
+      signal: args.dependencies.signal,
     });
     const applied = applyQueueSnapshot(
       state,

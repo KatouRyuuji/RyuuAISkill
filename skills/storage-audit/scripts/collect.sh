@@ -322,7 +322,8 @@ try:
             if not tag:
                 continue
             try:
-                data = z.read(i.filename)[:1048576].decode("utf-8", "replace")
+                with z.open(i) as entry:
+                    data = entry.read(1048576).decode("utf-8", "replace")
             except Exception:
                 data = ""
             if tag == "editorVersion":
@@ -666,12 +667,11 @@ if [ -n "$TARGET_RES" ] && [ "$MODE" = "project" ]; then
   scan_noise "$TARGET_RES"
 fi
 
-OUT="${TMPDIR}/storage-audit-collect-$(date +%Y%m%d-%H%M%S).json"
-export WORK WARN OUT MODE TARGET_RES KEEP_RES OS DISK_ROOT DISK_FREE DISK_USED SEVENZIP TAR_OK GIT_OK PARTIAL \
+export WORK WARN TMPDIR MODE TARGET_RES KEEP_RES OS DISK_ROOT DISK_FREE DISK_USED SEVENZIP TAR_OK GIT_OK PARTIAL \
   CACHES_FILE ARCH_FILE PROJ_FILE TOP_FILE GIT_FILE NOISE_FILE HOT_FILE LARGE_FILE
 
-python3 <<'PY'
-import json, os, pathlib
+OUT="$(python3 <<'PY'
+import json, os, pathlib, tempfile
 
 def read_jsonl(path):
     p = pathlib.Path(path)
@@ -740,14 +740,17 @@ if keep:
             p = e.get("path") or ""
             if p == kr or p.startswith(kr + "/"):
                 e["underKeepRoot"] = True
-out = os.environ["OUT"]
-pathlib.Path(out).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+fd, out = tempfile.mkstemp(prefix="storage-audit-collect-", suffix=".json", dir=os.environ["TMPDIR"])
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    f.write(json.dumps(result, ensure_ascii=False, indent=2))
 print(out)
 PY
+)"
 
 status=$?
 if [ $status -ne 0 ]; then
   echo '{"schema":"storage-audit-collect/1","error":"python3 required to emit JSON"}' >&2
   exit 1
 fi
+printf '%s\n' "$OUT"
 echo "storage-audit: wrote $OUT" >&2

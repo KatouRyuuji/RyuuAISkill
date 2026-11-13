@@ -30,13 +30,18 @@ Claude Code 是首要目标平台；仓库同时保留 pstack 对其他 harness 
 
 ## 安装
 
-使用 [`skills` CLI](https://skills.sh) 安装：
+RyuuAISkill 使用仓库自带的 Node 安装器，无第三方安装依赖。克隆仓库后，在父目录运行：
 
 ```bash
-npx skills add KatouRyuuji/RyuuAISkill
+git clone https://github.com/KatouRyuuji/RyuuAISkill.git
+node ./RyuuAISkill/scripts/install.mjs --target "$HOME/.claude"
 ```
 
-安装器会列出可选择的 skills。使用完整 RyuuAI 路由时，选择 `ryuuji-ai-skill`、`poteto-mode`、`storage-audit`、`agent-prompt-sync`、`sharpen` 及其依赖；只需要某个独立 skill 时，可以只安装它和所需依赖。
+`--target` 是包含 `skills/` 和 `agents/` 的 Agent 配置根目录，Claude Code 为 `~/.claude`。其他 Agent 使用其官方配置根目录。
+
+安装器完整复制 `skills/` 和 `agents/`，排除 `node_modules`，保留无关文件。重复安装相同内容不产生改动；同名但内容不同的目标默认拒绝覆盖。确认更新时追加 `--force`，旧文件保存在输出的 `backupPath`，中途失败会回滚。
+
+完整安装包含 `poteto-mode` 按名称加载的全部工作流和原则技能。
 
 ## 使用
 
@@ -125,6 +130,8 @@ skills/
   poteto-mode/         # poteto 编排、playbooks 和状态脚本
   principle-*/         # poteto 原则叶子 skills
 agents/                # pstack 子代理定义
+scripts/install.mjs    # 无第三方依赖的事务安装器
+tests/install/         # 安装冲突、备份、幂等与回滚测试
 tests/scoped-mcp/      # 子代理与独立进程的 MCP 测试
 docs/guide/            # pstack 使用指南
 ```
@@ -137,8 +144,11 @@ docs/guide/            # pstack 使用指南
 npx --yes bun install --cwd skills/poteto-mode/scripts --frozen-lockfile
 npx --yes bun test --cwd skills/poteto-mode/scripts
 npx --yes bun run --cwd skills/poteto-mode/scripts typecheck
+bash skills/storage-audit/scripts/collect.test.sh
+bash skills/poteto-mode/scripts/worktree-audit.test.sh
 node tests/scoped-mcp/run.mjs
 node tests/scoped-mcp/independent.mjs
+node --test tests/install/install.test.mjs
 ```
 
 storage-audit 的 quick 只读采集示例：

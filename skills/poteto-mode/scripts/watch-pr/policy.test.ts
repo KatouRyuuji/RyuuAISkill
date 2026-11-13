@@ -21,6 +21,7 @@ import {
 } from "./fakes.test-helper.ts";
 import type {
   GitHubReader,
+  MergeStateStatus,
   NonEmpty,
   PollingOptions,
   PrContext,
@@ -44,29 +45,76 @@ const options = {
 } satisfies PollingOptions;
 
 describe("readiness truth table", () => {
-  it("covers every specified row and every UNKNOWN rollup value", () => {
-    const cases: readonly [
-      PullRequestFacts["mergeStateStatus"],
-      RollupState,
-      "allowed" | "refused",
-    ][] = [
-      ["BLOCKED", "FAILURE", "refused"],
-      ["BLOCKED", "ERROR", "refused"],
-      ["BLOCKED", "PENDING", "allowed"],
-      ["UNSTABLE", "FAILURE", "allowed"],
-      ["UNKNOWN", "ERROR", "allowed"],
-      ["UNKNOWN", "EXPECTED", "allowed"],
-      ["UNKNOWN", "FAILURE", "allowed"],
-      ["UNKNOWN", "PENDING", "allowed"],
-      ["UNKNOWN", "SUCCESS", "allowed"],
-      ["UNKNOWN", null, "allowed"],
-      ["CLEAN", "SUCCESS", "allowed"],
-    ];
-    for (const [mergeStateStatus, headRollupState, expected] of cases) {
-      expect(
-        assessGitHubMerge({ mergeStateStatus, headRollupState }).kind
-      ).toBe(expected);
-    }
+  it("fails closed for protected states across every rollup", () => {
+    const mergeStates = [
+      "BEHIND",
+      "BLOCKED",
+      "CLEAN",
+      "CONFLICTING",
+      "DIRTY",
+      "DRAFT",
+      "HAS_HOOKS",
+      "UNKNOWN",
+      "UNSTABLE",
+    ] as const satisfies readonly MergeStateStatus[];
+    const rollupStates = [
+      "ERROR",
+      "EXPECTED",
+      "FAILURE",
+      "PENDING",
+      "SUCCESS",
+      null,
+    ] as const satisfies readonly RollupState[];
+    expect(mergeStates).toHaveLength(9);
+    expect(rollupStates).toHaveLength(6);
+    for (const mergeStateStatus of mergeStates)
+      for (const headRollupState of rollupStates) {
+        const expected =
+          mergeStateStatus === "BLOCKED" &&
+          (headRollupState === "PENDING" || headRollupState === "EXPECTED")
+            ? "allowed"
+            : ["BEHIND", "BLOCKED", "UNKNOWN"].includes(mergeStateStatus)
+              ? "refused"
+              : "allowed";
+        expect(
+          assessGitHubMerge({ mergeStateStatus, headRollupState }).kind,
+          `${mergeStateStatus}/${headRollupState}`
+        ).toBe(expected);
+      }
+  });
+
+  it("waits for visible required checks while GitHub is blocked by a pending rollup", async () => {
+    const snapshot = await readSnapshot({
+      reader: fakeReader({
+        facts: { mergeStateStatus: "BLOCKED" },
+        fastPath: { kind: "checks", checks: [pendingCheck()] },
+        commitRollups: [{ oid: "head", state: "PENDING" }],
+      }),
+      context: context(1),
+      pendingHistory: "include",
+      allowDraft: false,
+    });
+    expect(snapshot.kind).toBe("open");
+    if (snapshot.kind !== "open") throw new Error("expected open snapshot");
+    expect(snapshot.ci.kind).toBe("ci-pending");
+    expect(classifyPr(snapshot).kind).toBe("waiting");
+  });
+
+  it("does not treat a pending rollup without visible pending checks as clean", async () => {
+    const snapshot = await readSnapshot({
+      reader: fakeReader({
+        facts: { mergeStateStatus: "BLOCKED" },
+        fastPath: { kind: "checks", checks: [passingCheck()] },
+        commitRollups: [{ oid: "head", state: "PENDING" }],
+      }),
+      context: context(1),
+      pendingHistory: "include",
+      allowDraft: false,
+    });
+    expect(snapshot.kind).toBe("open");
+    if (snapshot.kind !== "open") throw new Error("expected open snapshot");
+    expect(snapshot.ci.kind).toBe("ci-github-rejected");
+    expect(classifyPr(snapshot).kind).toBe("blocker");
   });
 
   it("turns a clean visible list plus GitHub refusal into an explicit CI blocker", async () => {
@@ -87,6 +135,33 @@ describe("readiness truth table", () => {
     expect(classifyPr(snapshot)).toMatchObject({
       kind: "blocker",
       blocker: { kind: "failing-checks" },
+    });
+  });
+
+  it("blocks readiness when GitHub still requires a review", async () => {
+    const snapshot = await readSnapshot({
+      reader: fakeReader({ facts: { reviewDecision: "REVIEW_REQUIRED" } }),
+      context: context(6),
+      pendingHistory: "include",
+      allowDraft: false,
+    });
+    expect(classifyPr(snapshot)).toMatchObject({
+      kind: "blocker",
+      blocker: { kind: "merge-gate", reason: "review-required" },
+    });
+  });
+
+  it("allows a draft only when --allow-draft removes that gate", async () => {
+    const snapshot = await readSnapshot({
+      reader: fakeReader({ facts: { isDraft: true, mergeStateStatus: "DRAFT" } }),
+      context: context(7),
+      pendingHistory: "include",
+      allowDraft: true,
+    });
+    expect(classifyPr(snapshot, true).kind).toBe("ready");
+    expect(classifyPr(snapshot)).toMatchObject({
+      kind: "blocker",
+      blocker: { kind: "merge-gate", reason: "draft-pr" },
     });
   });
 });

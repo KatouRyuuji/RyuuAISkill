@@ -1,6 +1,6 @@
 # pstack in Claude Code
 
-pstack skills use Cursor names. In Claude Code, read this file once per session, then map each Cursor name in a skill with the tables below. `<pstack>` means the folder that holds `skills/` and `docs/`. If a Cursor field has no row, drop it and say so. Never pass a field or value the tool schema rejects.
+pstack skills use Cursor names. In Claude Code, read this file once per session, then map each Cursor name in a skill with the tables below. `<pstack>` means the local RyuuAISkill clone used for repository docs; installed skills live under `~/.claude/skills/`. If a Cursor field has no row, drop it and say so. Never pass a field or value the tool schema rejects.
 
 ## Tools
 
@@ -9,7 +9,7 @@ pstack skills use Cursor names. In Claude Code, read this file once per session,
 | `Task` | `Agent` |
 | `AskQuestion` | `AskUserQuestion`. In `-p` mode it is absent, so ask in plain text. |
 | Open a todolist | Use `TodoWrite` if the session offers it. Otherwise keep the list in your reply and update it at each phase. |
-| Run another pstack skill (`/name` or "the **name** skill") | `Read` `<pstack>/skills/<name>/SKILL.md` and follow it. The `Skill` tool refuses most pstack skills. When you tell the user to type it, write `/pstack:<name>`. |
+| Run another pstack skill (`/name` or "the **name** skill") | `Read` `~/.claude/skills/<name>/SKILL.md` and follow it. The `Skill` tool refuses most pstack skills. When you tell the user to type it, write `/<name>`. |
 | `Grep`, `Glob` | `Bash` with `rg` when the session has no `Grep` or `Glob`. |
 
 ## Subagent fields
@@ -17,7 +17,7 @@ pstack skills use Cursor names. In Claude Code, read this file once per session,
 | Cursor | Claude Code |
 | --- | --- |
 | `subagent_type: generalPurpose` | `subagent_type: "general-purpose"` |
-| `poteto-agent`, `comment-sicko` | `pstack:poteto-agent`, `pstack:comment-sicko` |
+| `poteto-agent`, `comment-sicko` | `poteto-agent`, `comment-sicko` |
 | `readonly: true` | `subagent_type: "Explore"`. It keeps `Bash`, so the brief also says "do not edit files", and you check `git status` afterward. |
 | `readonly: false` | `general-purpose`. It keeps the session's MCP servers. |
 | `environment: "cloud"` | `isolation: "worktree"`. Name the branch or commit the worker checks out. |
@@ -50,9 +50,9 @@ Claude Code loads every `.md` file in `~/.claude/rules/` into each new session, 
 | Cursor | Claude Code |
 | --- | --- |
 | `.cursor/skills/`, `~/.cursor/skills/` | `.claude/skills/`, `~/.claude/skills/` |
-| `~/.cursor/plugins/`, `.cursor-plugin/plugin.json` | `~/.claude/plugins/`, `.claude-plugin/plugin.json` |
+| Plugin installation paths | RyuuAISkill installs direct copies into `~/.claude/skills/` and `~/.claude/agents/`; no plugin directory or manifest is used. |
 | `.cursor/rules/*.mdc`, always-applied rules | `CLAUDE.md`, or `AGENTS.md` when no `CLAUDE.md` exists. Claude Code never reads `.mdc` files. The model rule is the exception. See Models. |
-| `https://github.com/cursor/plugins/blob/main/pstack/<path>` | `<pstack>/<path>` when that file exists. The plugin ships the skills, `docs/guide/`, and `README.md`. Read the local copy and never fetch it. Give the user the URL when they need a link. |
+| `https://github.com/KatouRyuuji/RyuuAISkill/blob/main/<path>` | `<pstack>/<path>` in the local clone when that file exists. Installed skills contain only their own directories, so use the public URL for root README and docs. |
 | Transcripts in `~/.cursor/projects/<slug>/agent-transcripts/` | `~/.claude/projects/<slug>/<session>.jsonl`. The slug is the workspace path with each `/` and `.` changed to `-`, so `/Users/you/proj` is `-Users-you-proj`. The newest `.jsonl` directly in that folder is the current session. Its `<session>/subagents/` folder holds subagent transcripts. Read only this workspace's folder. |
 
 ## Cursor-only features

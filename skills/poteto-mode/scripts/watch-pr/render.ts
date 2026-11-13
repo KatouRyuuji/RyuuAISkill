@@ -12,7 +12,7 @@ function ciCell(row: T.PrSnapshot): string {
     case "ci-failing":
       return `❌ ${row.ci.failed.length} failed${row.ci.pending.length ? `, ${row.ci.pending.length} pending` : ""}${was}`;
     case "ci-github-rejected":
-      return `❌ GitHub reports failing checks${was}`;
+      return `❌ GitHub merge refused (${row.ci.github.mergeStateStatus})${was}`;
     default: {
       const exhaustive: never = row.ci;
       return exhaustive;
@@ -36,6 +36,12 @@ function mergeCell(row: T.PrSnapshot): string {
   if (row.facts.isDraft) return "⏸ draft";
   if (row.facts.reviewDecision === "CHANGES_REQUESTED")
     return "⚠️ changes requested";
+  if (row.facts.reviewDecision === "REVIEW_REQUIRED")
+    return "⚠️ review required";
+  if (row.facts.mergeStateStatus === "BEHIND") return "⚠️ branch behind";
+  if (row.facts.mergeStateStatus === "BLOCKED") return "⚠️ merge blocked";
+  if (row.facts.mergeStateStatus === "UNKNOWN")
+    return "⚠️ merge state unknown";
   return row.facts.mergeable === "CONFLICTING" ||
     row.facts.mergeStateStatus === "DIRTY" ||
     row.facts.mergeStateStatus === "CONFLICTING"
@@ -110,7 +116,9 @@ function renderBlocker(blocker: T.MergeBlocker | StatusQueryBlocker): string {
           ? "restore or remove the closed PR from the queued stack"
           : blocker.reason === "draft-pr"
             ? "mark the PR ready for review before waiting for the merge queue"
-            : "resolve the changes-requested review before waiting for the merge queue";
+            : blocker.reason === "changes-requested"
+              ? "resolve the changes-requested review before waiting for the merge queue"
+              : "obtain the required review before waiting for the merge queue";
       return [
         `BLOCKER: ${blocker.reason}`,
         `pr=${blocker.pr.number}`,
@@ -160,6 +168,8 @@ export function renderPretty(verdict: T.WatcherVerdict): string {
         return "TIMEOUT: checks still pending\n";
       if (verdict.reason.kind === "status-unavailable")
         return "TIMEOUT: GitHub status remained unavailable\n";
+      if (verdict.reason.kind === "deadline-exceeded")
+        return "TIMEOUT: total deadline exceeded\n";
       return `TIMEOUT: queued stack still has ${verdict.reason.unmergedCount} PR${verdict.reason.unmergedCount === 1 ? "" : "s"} unmerged; frontier=#${verdict.reason.frontier.number}\n`;
     default: {
       const exhaustive: never = verdict;

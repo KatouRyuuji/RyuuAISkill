@@ -1,18 +1,17 @@
-# Set up pstack
+# Set up RyuuAISkill
 
-In this page you install the plugin, pick which models pstack uses, and run your first task. Setup is one command plus a short conversation.
+In this page you install RyuuAISkill, pick which models pstack uses, and run your first task. Setup is one install command plus a short conversation.
 
-## Install the plugin
+## Install
 
-In a Cursor chat, run:
+Clone the repository and run the Node installer from its parent directory:
 
-```text
-/add-plugin pstack
+```bash
+git clone https://github.com/KatouRyuuji/RyuuAISkill.git
+node ./RyuuAISkill/scripts/install.mjs --target "$HOME/.claude"
 ```
 
-Cursor confirms the plugin is installed.
-
-In Claude Code, run `/plugin marketplace add cursor/plugins`, then `/plugin install pstack@cursor-plugins`. Claude Code prefixes plugin commands, so each command in this guide takes a `pstack:` prefix there, such as `/pstack:setup-pstack`, which writes its model rule to `~/.claude/rules/pstack-models.md`. The [Claude Code adapter](../harness/claude-code.md) covers the other differences.
+For Claude Code, `--target` is `~/.claude`. For another harness, use its official configuration root containing `skills/` and `agents/`. The installer copies all skills and agents without `node_modules`, refuses modified targets by default, and rolls back failed installs. Rerun with `--force` only after reviewing conflicts; it keeps a backup. Commands remain unprefixed, such as `/setup-pstack`, which writes its model rule to `~/.claude/rules/pstack-models.md`. The [Claude Code adapter](../harness/claude-code.md) covers the other differences.
 
 ## Pick your models
 

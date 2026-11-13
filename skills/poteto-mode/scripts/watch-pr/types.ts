@@ -97,21 +97,24 @@ export interface CommitRollup {
 }
 export interface GitHubMergeRefusal {
   readonly kind: "refused";
-  readonly mergeStateStatus: "BLOCKED";
-  readonly headRollupState: "ERROR" | "FAILURE";
+  readonly mergeStateStatus: "BEHIND" | "BLOCKED" | "UNKNOWN";
+  readonly headRollupState: RollupState;
 }
 export type GitHubMergeAllowed =
   | {
       readonly kind: "allowed";
       readonly basis: "merge-state";
-      readonly mergeStateStatus: Exclude<MergeStateStatus, "BLOCKED">;
+      readonly mergeStateStatus: Exclude<
+        MergeStateStatus,
+        "BEHIND" | "BLOCKED" | "UNKNOWN"
+      >;
       readonly headRollupState: RollupState;
     }
   | {
       readonly kind: "allowed";
       readonly basis: "rollup";
       readonly mergeStateStatus: "BLOCKED";
-      readonly headRollupState: Exclude<RollupState, "ERROR" | "FAILURE">;
+      readonly headRollupState: "EXPECTED" | "PENDING";
     };
 export type GitHubMergeAssessment = GitHubMergeAllowed | GitHubMergeRefusal;
 interface CiBase {
@@ -140,7 +143,7 @@ export type CiClean = CiBase & {
   readonly kind: "ci-clean";
   readonly failed: readonly [];
   readonly pending: readonly [];
-  readonly github: GitHubMergeAllowed;
+  readonly github: Extract<GitHubMergeAllowed, { readonly basis: "merge-state" }>;
 };
 export type CiState = CiFailing | CiGithubRejected | CiPending | CiClean;
 export type PrSnapshot =
@@ -166,7 +169,7 @@ export interface ReadyPr {
     readonly ci: CiClean;
     readonly gate: {
       readonly state: "OPEN";
-      readonly reviewDecision: Exclude<ReviewDecision, "CHANGES_REQUESTED">;
+      readonly reviewDecision: "APPROVED" | null;
       readonly draft: "not-draft" | "draft-allowed";
     };
   };
@@ -179,7 +182,8 @@ export interface MergedPr {
 export type MergeGateReason =
   | "closed-without-merge"
   | "draft-pr"
-  | "changes-requested";
+  | "changes-requested"
+  | "review-required";
 export type MergeBlocker =
   | {
       readonly kind: "merge-conflicts";
@@ -338,6 +342,7 @@ export type TimeoutVerdict = Terminal<"TIMEOUT", 5> & {
         readonly pending: NonEmpty<PendingCheck>;
       }
     | { readonly kind: "status-unavailable"; readonly failure: QueryFailure }
+    | { readonly kind: "deadline-exceeded" }
     | {
         readonly kind: "queued-stack";
         readonly frontier: PrContext;
@@ -390,20 +395,28 @@ export interface ReviewThreadPage {
   readonly endCursor: string | null;
 }
 export interface GitHubReader {
-  originRepo(): Promise<Repository | null>;
-  currentPr(pr: PrNumber | null): Promise<PrContext>;
-  pullRequest(context: PrContext): Promise<PullRequestFacts>;
-  openPullRequests(repository: Repository): Promise<readonly OpenPullRequest[]>;
-  checksFastPath(context: PrContext): Promise<ChecksFastPath>;
+  originRepo(signal?: AbortSignal): Promise<Repository | null>;
+  currentPr(pr: PrNumber | null, signal?: AbortSignal): Promise<PrContext>;
+  pullRequest(context: PrContext, signal?: AbortSignal): Promise<PullRequestFacts>;
+  openPullRequests(
+    repository: Repository,
+    signal?: AbortSignal
+  ): Promise<readonly OpenPullRequest[]>;
+  checksFastPath(context: PrContext, signal?: AbortSignal): Promise<ChecksFastPath>;
   checkRollupPage(
     context: PrContext,
-    after: string | null
+    after: string | null,
+    signal?: AbortSignal
   ): Promise<RollupPage>;
   reviewThreadPage(
     context: PrContext,
-    after: string | null
+    after: string | null,
+    signal?: AbortSignal
   ): Promise<ReviewThreadPage>;
-  commitRollups(context: PrContext): Promise<readonly CommitRollup[]>;
+  commitRollups(
+    context: PrContext,
+    signal?: AbortSignal
+  ): Promise<readonly CommitRollup[]>;
 }
 export interface PollingOptions {
   readonly interval: number;

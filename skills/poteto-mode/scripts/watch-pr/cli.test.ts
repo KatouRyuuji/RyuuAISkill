@@ -7,7 +7,10 @@ import { parsePrNumber } from "./types.ts";
 
 const silentIo = { stdout: () => {}, stderr: () => {} };
 
-function testRuntime(reader: GitHubReader): {
+function testRuntime(
+  reader: GitHubReader,
+  now: () => number = () => 0
+): {
   readonly runtime: CliRuntime;
   readonly stdout: string[];
   readonly stderr: string[];
@@ -20,7 +23,7 @@ function testRuntime(reader: GitHubReader): {
     runtime: {
       reader,
       clock: {
-        now: () => 0,
+        now,
         observedAt: () => "2026-07-26T00:00:00.000Z",
         async sleep() {
           throw new Error("test unexpectedly slept");
@@ -213,6 +216,97 @@ describe("main", () => {
       },
     });
   });
+
+  it("returns exit 6 with a readable required-review gate", async () => {
+    const reader = fakeReader({
+      facts: { reviewDecision: "REVIEW_REQUIRED" },
+    });
+    const harness = testRuntime(reader);
+    const code = await main(
+      ["--owner", "owner", "--repo", "repo", "--pr", "1", "--pretty"],
+      harness.runtime
+    );
+    expect(code).toBe(6);
+    expect(harness.stdout[0]).toContain("BLOCKER: review-required");
+    expect(harness.stdout[0]).toContain("obtain the required review");
+  });
+
+  it("includes PR context resolution in the total deadline", async () => {
+    let now = 0;
+    const base = fakeReader();
+    const reader = {
+      ...base,
+      async currentPr(pr: Parameters<GitHubReader["currentPr"]>[0]) {
+        now = 6;
+        return base.currentPr(pr);
+      },
+    } satisfies GitHubReader;
+    const harness = testRuntime(reader, () => now);
+    expect(await main(["--timeout", "5"], harness.runtime)).toBe(5);
+    expect(reader.calls).toEqual(["currentPr"]);
+    expect(JSON.parse(harness.stdout[0])).toMatchObject({
+      kind: "TIMEOUT",
+      exitCode: 5,
+      reason: { kind: "deadline-exceeded" },
+    });
+  });
+
+  it("stops a multi-PR scan when the total deadline has elapsed", async () => {
+    let now = 0;
+    const base = fakeReader();
+    const reader = {
+      ...base,
+      async pullRequest(pr: Parameters<GitHubReader["pullRequest"]>[0]) {
+        now = 6;
+        return base.pullRequest(pr);
+      },
+    } satisfies GitHubReader;
+    const harness = testRuntime(reader, () => now);
+    const code = await main(
+      [
+        "--owner",
+        "owner",
+        "--repo",
+        "repo",
+        "--queued-stack",
+        "--stack-prs",
+        "1,2",
+        "--status-only",
+        "--timeout",
+        "5",
+      ],
+      harness.runtime
+    );
+    expect(code).toBe(5);
+    expect(reader.calls.filter((call) => call === "pullRequest")).toHaveLength(1);
+    expect(JSON.parse(harness.stdout[0])).toMatchObject({
+      kind: "TIMEOUT",
+      exitCode: 5,
+    });
+  });
+
+  it("aborts a query that remains pending at the deadline", async () => {
+    const base = fakeReader();
+    let observedSignal: AbortSignal | undefined;
+    const reader = {
+      ...base,
+      async currentPr(
+        _pr: Parameters<GitHubReader["currentPr"]>[0],
+        signal?: AbortSignal
+      ) {
+        observedSignal = signal;
+        return new Promise<never>(() => {});
+      },
+    } satisfies GitHubReader;
+    const harness = testRuntime(reader);
+    expect(await main(["--timeout", "0.01"], harness.runtime)).toBe(5);
+    expect(observedSignal?.aborted).toBe(true);
+    expect(JSON.parse(harness.stdout[0])).toMatchObject({
+      kind: "TIMEOUT",
+      exitCode: 5,
+      reason: { kind: "deadline-exceeded" },
+    });
+  }, 1000);
 
   it("shows help without touching the reader", async () => {
     const reader = fakeReader();

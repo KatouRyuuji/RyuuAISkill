@@ -12,6 +12,8 @@ import {
   resolveContext,
 } from "./github.ts";
 import {
+  deadlineTimeoutVerdict,
+  raceDeadline,
   runQueued,
   runSimple,
   statusQueryVerdict,
@@ -182,42 +184,78 @@ export async function main(
     return error.exitCode === 0 ? 0 : 64;
   }
   const render = options.pretty ? renderPretty : renderJson;
-  const emit = (verdict: T.ProgressVerdict): void =>
-    runtime.stdout(render(verdict));
-  let contexts: T.NonEmpty<T.PrContext>;
+  const controller = new AbortController();
+  const signal =
+    options.polling.timeout > 0 ? controller.signal : undefined;
+  const startedAt = runtime.clock.now();
+  const timer =
+    signal === undefined
+      ? null
+      : setTimeout(
+          () => controller.abort(),
+          options.polling.timeout * 1_000
+        );
+  timer?.unref();
   try {
-    const seed = await resolveContext({
+    const emit = (verdict: T.ProgressVerdict): void =>
+      runtime.stdout(render(verdict));
+    let contexts: T.NonEmpty<T.PrContext>;
+    try {
+      contexts = await raceDeadline(
+        async (): Promise<T.NonEmpty<T.PrContext>> => {
+          const seed = await resolveContext({
+            reader: runtime.reader,
+            owner: options.owner,
+            repo: options.repo,
+            pr: options.pr ?? options.stackPrs[0] ?? null,
+            signal,
+          });
+          return (
+            nonEmpty(options.stackPrs.map((number) => ({ ...seed, number }))) ??
+            (options.mode === "single"
+              ? [seed]
+              : await discoverStack(runtime.reader, seed, signal))
+          );
+        },
+        signal
+      );
+    } catch (error) {
+      if (signal?.aborted) {
+        const verdict = deadlineTimeoutVerdict(
+          verdictFactory(runtime.clock, options.mode)
+        );
+        runtime.stdout(render(verdict));
+        return verdict.exitCode;
+      }
+      if (!(error instanceof WatcherQueryError)) throw error;
+      const verdict = statusQueryVerdict(
+        verdictFactory(runtime.clock, options.mode),
+        1,
+        error.failure
+      );
+      runtime.stdout(render(verdict));
+      return verdict.exitCode;
+    }
+    const dependencies = {
       reader: runtime.reader,
-      owner: options.owner,
-      repo: options.repo,
-      pr: options.pr ?? options.stackPrs[0] ?? null,
-    });
-    contexts =
-      nonEmpty(options.stackPrs.map((number) => ({ ...seed, number }))) ??
-      (options.mode === "single"
-        ? [seed]
-        : await discoverStack(runtime.reader, seed));
-  } catch (error) {
-    if (!(error instanceof WatcherQueryError)) throw error;
-    const verdict = statusQueryVerdict(
-      verdictFactory(runtime.clock, options.mode),
-      1,
-      error.failure
-    );
+      clock: runtime.clock,
+      emit,
+      signal,
+      startedAt,
+    };
+    const verdict =
+      options.mode === "queued-stack" && !options.statusOnly
+        ? await runQueued({ dependencies, contexts, options: options.polling })
+        : await runSimple({
+            dependencies,
+            contexts,
+            mode: options.mode,
+            statusOnly: options.statusOnly,
+            options: options.polling,
+          });
     runtime.stdout(render(verdict));
     return verdict.exitCode;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
   }
-  const dependencies = { reader: runtime.reader, clock: runtime.clock, emit };
-  const verdict =
-    options.mode === "queued-stack" && !options.statusOnly
-      ? await runQueued({ dependencies, contexts, options: options.polling })
-      : await runSimple({
-          dependencies,
-          contexts,
-          mode: options.mode,
-          statusOnly: options.statusOnly,
-          options: options.polling,
-        });
-  runtime.stdout(render(verdict));
-  return verdict.exitCode;
 }

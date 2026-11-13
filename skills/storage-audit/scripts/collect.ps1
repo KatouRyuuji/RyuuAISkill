@@ -871,8 +871,14 @@ $result = [ordered]@{
 }
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$outFile = Join-Path $env:TEMP "storage-audit-collect-$stamp.json"
+$outFile = Join-Path $env:TEMP "storage-audit-collect-$stamp-$PID-$([Guid]::NewGuid().ToString('N')).json"
 $json = $result | ConvertTo-Json -Depth 8 -Compress:$false
-[System.IO.File]::WriteAllText($outFile, $json, [System.Text.UTF8Encoding]::new($false))
+$bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($json)
+$outStream = [System.IO.File]::Open($outFile, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+try {
+    $outStream.Write($bytes, 0, $bytes.Length)
+} finally {
+    $outStream.Dispose()
+}
 [Console]::Error.WriteLine("storage-audit: wrote $outFile")
 Write-Output $outFile
